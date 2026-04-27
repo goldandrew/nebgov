@@ -42,7 +42,15 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Run database migrations
+      - name: Run backend database migrations
+        run: npm run migrate
+
+      - name: Install indexer dependencies
+        working-directory: packages/indexer
+        run: npm install
+
+      - name: Run indexer database migrations
+        working-directory: packages/indexer
         run: npm run migrate
 
       - name: Build backend

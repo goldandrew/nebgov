@@ -1,15 +1,13 @@
 import dotenv from "dotenv";
 import path from "path";
-import { BACKEND_MIGRATIONS_TABLE } from "./migrationRunner";
+import { INDEXER_MIGRATIONS_TABLE } from "./runMigrations";
 
 dotenv.config();
 
 async function main(): Promise<void> {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    console.error("DATABASE_URL is required");
-    process.exit(1);
-  }
+  const databaseUrl =
+    process.env.DATABASE_URL ??
+    "postgres://nebgov:nebgov@localhost:5432/nebgov";
 
   const command = process.argv[2];
   const { runner } = await import("node-pg-migrate");
@@ -28,14 +26,14 @@ async function main(): Promise<void> {
       dir: path.join(process.cwd(), "migrations"),
       direction: "down",
       count,
-      migrationsTable: BACKEND_MIGRATIONS_TABLE,
+      migrationsTable: INDEXER_MIGRATIONS_TABLE,
     });
   } else {
     await runner({
       databaseUrl,
       dir: path.join(process.cwd(), "migrations"),
       direction: "up",
-      migrationsTable: BACKEND_MIGRATIONS_TABLE,
+      migrationsTable: INDEXER_MIGRATIONS_TABLE,
     });
   }
 }
