@@ -652,6 +652,16 @@ impl GovernorContract {
     pub fn cast_vote(env: Env, voter: Address, proposal_id: u64, support: VoteSupport) {
         voter.require_auth();
 
+        // Check if contract is paused
+        let is_paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false);
+        if is_paused {
+            env.panic_with_error(GovernorError::ContractPaused);
+        }
+
         // Validate vote support against configured vote type
         Self::validate_vote_support(&env, &support).unwrap_or_else(|e| env.panic_with_error(e));
 

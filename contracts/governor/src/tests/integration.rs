@@ -1237,3 +1237,434 @@ fn test_quorum_denominator_boundary_values() {
         "quorum_numerator=100 must return full supply"
     );
 }
+
+// ============================================================================
+// Pause/Unpause Integration Tests (Issue #247)
+// ============================================================================
+
+/// Test 1: Pause blocks propose()
+/// set pauser → pauser calls pause() → try propose() → expect ContractPaused error (code 7)
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_pause_blocks_propose() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Setup
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+    let token_admin = token::StellarAssetClient::new(&env, &token_addr);
+
+    let votes_id = env.register(TokenVotesContract, ());
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    votes_client.initialize(&admin, &token_addr);
+
+    let mock_target_id = env.register(MockTarget, ());
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
+
+    let pauser = Address::generate(&env);
+    governor_client.initialize(
+        &admin,
+        &votes_id,
+        &timelock_id,
+        &10_u32,
+        &20_u32,
+        &0_u32,
+        &0_i128,
+        &pauser,
+        &VoteType::Extended,
+        &120_960u32,
+    );
+
+    // Verify initial pauser is set to admin (who called initialize)
+    assert_eq!(governor_client.pauser(), admin);
+
+    // Set the pauser to the designated pauser address
+    governor_client.set_pauser(&pauser);
+    assert_eq!(governor_client.pauser(), pauser);
+
+    // Pause the contract
+    governor_client.pause(&pauser);
+    assert!(governor_client.is_paused());
+
+    // Try to propose while paused - should fail with ContractPaused (code 7)
+    let proposer = Address::generate(&env);
+    token_admin.mint(&proposer, &1000_i128);
+    votes_client.delegate(&proposer, &proposer);
+
+    let description = soroban_sdk::String::from_str(&env, "Test proposal during pause");
+    let description_hash = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, b"test"))
+        .into();
+    let metadata_uri = soroban_sdk::String::from_str(&env, "ipfs://test");
+
+    let mut targets = soroban_sdk::Vec::new(&env);
+    targets.push_back(mock_target_id.clone());
+    let mut fn_names = soroban_sdk::Vec::new(&env);
+    fn_names.push_back(Symbol::new(&env, "exec_gov"));
+    let mut calldatas = soroban_sdk::Vec::new(&env);
+    calldatas.push_back(Bytes::new(&env));
+
+    // This should panic with ContractPaused error (code 7)
+    governor_client.propose(
+        &proposer,
+        &description,
+        &description_hash,
+        &metadata_uri,
+        &targets,
+        &fn_names,
+        &calldatas,
+    );
+}
+
+/// Test 2: Pause blocks cast_vote()
+/// create proposal (before pause) → pause() → try cast_vote() → expect ContractPaused error
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_pause_blocks_cast_vote() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Setup
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+    let token_admin = token::StellarAssetClient::new(&env, &token_addr);
+
+    let votes_id = env.register(TokenVotesContract, ());
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    votes_client.initialize(&admin, &token_addr);
+
+    let mock_target_id = env.register(MockTarget, ());
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
+
+    let pauser = Address::generate(&env);
+    governor_client.initialize(
+        &admin,
+        &votes_id,
+        &timelock_id,
+        &10_u32,
+        &20_u32,
+        &0_u32,
+        &0_i128,
+        &pauser,
+        &VoteType::Extended,
+        &120_960u32,
+    );
+
+    governor_client.set_pauser(&pauser);
+
+    // Create voter with tokens
+    let voter = Address::generate(&env);
+    token_admin.mint(&voter, &1000_i128);
+    votes_client.delegate(&voter, &voter);
+
+    // Create proposal before pausing
+    let proposer = Address::generate(&env);
+    token_admin.mint(&proposer, &1000_i128);
+    votes_client.delegate(&proposer, &proposer);
+
+    let description = soroban_sdk::String::from_str(&env, "Test proposal");
+    let description_hash = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, b"test-vote"))
+        .into();
+    let metadata_uri = soroban_sdk::String::from_str(&env, "ipfs://test");
+
+    let mut targets = soroban_sdk::Vec::new(&env);
+    targets.push_back(mock_target_id.clone());
+    let mut fn_names = soroban_sdk::Vec::new(&env);
+    fn_names.push_back(Symbol::new(&env, "exec_gov"));
+    let mut calldatas = soroban_sdk::Vec::new(&env);
+    calldatas.push_back(Bytes::new(&env));
+
+    let proposal_id = governor_client.propose(
+        &proposer,
+        &description,
+        &description_hash,
+        &metadata_uri,
+        &targets,
+        &fn_names,
+        &calldatas,
+    );
+
+    // Advance to voting period
+    env.ledger().with_mut(|l| l.sequence_number = 11);
+
+    // Now pause the contract
+    governor_client.pause(&pauser);
+    assert!(governor_client.is_paused());
+
+    // Try to cast vote while paused - should fail with ContractPaused (code 7)
+    governor_client.cast_vote(&voter, &proposal_id, &VoteSupport::For);
+}
+
+/// Test 3: Unpause via governance restores functionality
+/// pause() → create unpause proposal → wait timelock → execute unpause proposal →
+/// assert is_paused() == false → propose() succeeds
+#[test]
+fn test_unpause_via_governance_restores_functionality() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Setup
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+    let token_admin = token::StellarAssetClient::new(&env, &token_addr);
+
+    let votes_id = env.register(TokenVotesContract, ());
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    votes_client.initialize(&admin, &token_addr);
+
+    let mock_target_id = env.register(MockTarget, ());
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    let min_delay: u64 = 1;
+    timelock_client.initialize(&admin, &governor_id, &min_delay, &1_209_600);
+
+    let pauser = Address::generate(&env);
+    governor_client.initialize(
+        &admin,
+        &votes_id,
+        &timelock_id,
+        &10_u32,
+        &20_u32,
+        &0_u32,
+        &0_i128,
+        &pauser,
+        &VoteType::Extended,
+        &120_960u32,
+    );
+
+    governor_client.set_pauser(&pauser);
+
+    // Setup voters
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    token_admin.mint(&alice, &500_i128);
+    token_admin.mint(&bob, &500_i128);
+    votes_client.delegate(&alice, &alice);
+    votes_client.delegate(&bob, &bob);
+
+    // Pause the contract
+    governor_client.pause(&pauser);
+    assert!(governor_client.is_paused(), "contract should be paused");
+
+    // Create an unpause proposal (targeting the governor itself)
+    let proposer = Address::generate(&env);
+    token_admin.mint(&proposer, &1000_i128);
+    votes_client.delegate(&proposer, &proposer);
+
+    let description = soroban_sdk::String::from_str(&env, "Unpause the governor");
+    let description_hash = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, b"unpause-proposal"))
+        .into();
+    let metadata_uri = soroban_sdk::String::from_str(&env, "ipfs://unpause");
+
+    let mut targets = soroban_sdk::Vec::new(&env);
+    targets.push_back(governor_id.clone());
+    let mut fn_names = soroban_sdk::Vec::new(&env);
+    fn_names.push_back(Symbol::new(&env, "unpause"));
+    let mut calldatas = soroban_sdk::Vec::new(&env);
+    calldatas.push_back(Bytes::new(&env)); // unpause takes no args
+
+    let unpause_proposal_id = governor_client.propose(
+        &proposer,
+        &description,
+        &description_hash,
+        &metadata_uri,
+        &targets,
+        &fn_names,
+        &calldatas,
+    );
+
+    // Vote to succeed
+    env.ledger().with_mut(|l| l.sequence_number = 11);
+    governor_client.cast_vote(&alice, &unpause_proposal_id, &VoteSupport::For);
+    governor_client.cast_vote(&bob, &unpause_proposal_id, &VoteSupport::For);
+
+    // Advance past voting period and queue
+    env.ledger().with_mut(|l| l.sequence_number = 31);
+    assert_eq!(
+        governor_client.state(&unpause_proposal_id),
+        ProposalState::Succeeded
+    );
+
+    let ts_before_queue = env.ledger().timestamp();
+    governor_client.queue(&unpause_proposal_id);
+    assert_eq!(
+        governor_client.state(&unpause_proposal_id),
+        ProposalState::Queued
+    );
+
+    // Advance past timelock delay
+    env.ledger()
+        .with_mut(|l| l.timestamp = ts_before_queue + min_delay + 1);
+
+    // Execute the unpause proposal
+    governor_client.execute(&unpause_proposal_id);
+
+    // Verify contract is unpaused
+    assert!(
+        !governor_client.is_paused(),
+        "contract should be unpaused after governance execution"
+    );
+
+    // Verify Unpaused event was emitted
+    assert!(
+        count_topic(&env, "Unpaused") >= 1,
+        "Unpaused event should be emitted"
+    );
+
+    // Now proposing should succeed
+    let new_proposer = Address::generate(&env);
+    token_admin.mint(&new_proposer, &1000_i128);
+    votes_client.delegate(&new_proposer, &new_proposer);
+
+    let new_description = soroban_sdk::String::from_str(&env, "Post-unpause proposal");
+    let new_description_hash = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, b"post-unpause"))
+        .into();
+    let new_metadata_uri = soroban_sdk::String::from_str(&env, "ipfs://post-unpause");
+
+    let mut new_targets = soroban_sdk::Vec::new(&env);
+    new_targets.push_back(mock_target_id.clone());
+    let mut new_fn_names = soroban_sdk::Vec::new(&env);
+    new_fn_names.push_back(Symbol::new(&env, "exec_gov"));
+    let mut new_calldatas = soroban_sdk::Vec::new(&env);
+    new_calldatas.push_back(Bytes::new(&env));
+
+    let new_proposal_id = governor_client.propose(
+        &new_proposer,
+        &new_description,
+        &new_description_hash,
+        &new_metadata_uri,
+        &new_targets,
+        &new_fn_names,
+        &new_calldatas,
+    );
+
+    assert_eq!(new_proposal_id, 2, "new proposal should be created after unpause");
+    assert_eq!(
+        governor_client.state(&new_proposal_id),
+        ProposalState::Pending,
+        "new proposal should be in Pending state"
+    );
+}
+
+/// Test 4: Only pauser can pause
+/// non-pauser address calls pause() → expect UnauthorizedPause error (code 8)
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_only_pauser_can_pause() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Setup
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+
+    let votes_id = env.register(TokenVotesContract, ());
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    votes_client.initialize(&admin, &token_addr);
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
+
+    let pauser = Address::generate(&env);
+    governor_client.initialize(
+        &admin,
+        &votes_id,
+        &timelock_id,
+        &10_u32,
+        &20_u32,
+        &0_u32,
+        &0_i128,
+        &pauser,
+        &VoteType::Extended,
+        &120_960u32,
+    );
+
+    governor_client.set_pauser(&pauser);
+    assert_eq!(governor_client.pauser(), pauser);
+
+    // Non-pauser tries to pause - should fail with UnauthorizedPause (code 8)
+    let non_pauser = Address::generate(&env);
+    governor_client.pause(&non_pauser);
+}
+
+/// Test 5: set_pauser only via self-auth
+/// direct call to set_pauser() → expect auth error
+#[test]
+#[should_panic]
+fn test_set_pauser_requires_self_auth() {
+    let env = Env::default();
+    // Use strict auth mocking to catch unauthorized calls
+    env.mock_all_auths();
+
+    // Setup
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+
+    let votes_id = env.register(TokenVotesContract, ());
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    votes_client.initialize(&admin, &token_addr);
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
+
+    let pauser = Address::generate(&env);
+    governor_client.initialize(
+        &admin,
+        &votes_id,
+        &timelock_id,
+        &10_u32,
+        &20_u32,
+        &0_u32,
+        &0_i128,
+        &pauser,
+        &VoteType::Extended,
+        &120_960u32,
+    );
+
+    // Direct call to set_pauser by admin (not through governance) should fail
+    // because set_pauser requires env.current_contract_address().require_auth()
+    let new_pauser = Address::generate(&env);
+    governor_client.set_pauser(&new_pauser);
+}
