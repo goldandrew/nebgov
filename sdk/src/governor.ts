@@ -1056,7 +1056,8 @@ export class GovernorClient {
       .result?.retval;
     if (!raw) throw new Error("No return value");
 
-    return toBigInt(scValToNative(raw) as number | bigint | string);
+    const quorum = BigInt(scValToNative(raw));
+    return quorum;
   }
 
   /**
