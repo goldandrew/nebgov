@@ -4,7 +4,6 @@ on:
   push:
     paths:
       - 'sdk/**'
-      - 'pnpm-lock.yaml'
   pull_request:
     paths:
       - 'sdk/**'
