@@ -324,6 +324,66 @@ impl GovernorContract {
             .unwrap_or_else(|| env.panic_with_error(GovernorError::ProposalNotFound))
     }
 
+    /// Extend the TTL of a proposal storage entry to cover its full lifecycle.
+    ///
+    /// Soroban persistent storage entries have a TTL that must be explicitly extended.
+    /// This function ensures a proposal's storage entry will not expire before the
+    /// proposal can be executed. The TTL is extended to cover:
+    /// - Voting period (end_ledger - current_ledger)
+    /// - Grace period (proposal_grace_period)
+    /// - Timelock delay and execution window
+    /// - Additional buffer for safety
+    fn extend_proposal_ttl(env: &Env, proposal_id: u64, proposal: &Proposal) {
+        let current = env.ledger().sequence();
+        
+        // Get configuration from storage
+        let voting_period: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VotingPeriod)
+            .unwrap_or(1000);
+        let grace_period: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalGracePeriod)
+            .unwrap_or(120_960);
+        
+        // Get timelock delay and execution window
+        let timelock_addr: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Timelock);
+        
+        let timelock_delay_ledgers: u32 = if let Some(addr) = timelock_addr {
+            let timelock = TimelockClient::new(env, &addr);
+            let delay_seconds = timelock.min_delay();
+            let execution_window_seconds = timelock.execution_window();
+            // Convert seconds to ledgers (assuming ~5 second blocks)
+            ((delay_seconds + execution_window_seconds) / 5) as u32
+        } else {
+            1000 // conservative default
+        };
+        
+        // Calculate remaining ledgers until proposal end
+        let ledgers_until_end = if current < proposal.end_ledger {
+            proposal.end_ledger - current
+        } else {
+            0
+        };
+        
+        // Total TTL: remaining voting period + grace period + timelock operations + buffer
+        // The buffer ensures we don't expire even if timing is tight
+        let ttl_ledgers = ledgers_until_end
+            .saturating_add(grace_period)
+            .saturating_add(timelock_delay_ledgers)
+            .saturating_add(1000); // 1000 ledger safety buffer (~83 minutes)
+        
+        // Extend the TTL for the proposal storage entry
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Proposal(proposal_id), ttl_ledgers);
+    }
+
     fn decode_calldata_args(env: &Env, data: &Bytes) -> Vec<Val> {
         if data.is_empty() {
             return Vec::new(env);
@@ -582,6 +642,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         env.storage()
             .instance()
             .set(&DataKey::ProposalCount, &proposal_id);
@@ -714,6 +776,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         env.storage()
             .persistent()
             .set(&DataKey::HasVoted(proposal_id, voter.clone()), &true);
@@ -780,6 +844,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         env.storage()
             .persistent()
             .set(&DataKey::HasVoted(proposal_id, voter.clone()), &true);
@@ -891,6 +957,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
 
         // Store the queue time (current ledger sequence) for veto window tracking
         let queue_time = env.ledger().sequence();
@@ -1028,6 +1096,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
 
         events::emit_proposal_executed(&env, proposal_id, &gov_addr);
     }
@@ -1082,6 +1152,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         events::emit_proposal_cancelled(&env, proposal_id, &caller);
     }
 
@@ -1115,6 +1187,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal_mut);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal_mut);
 
         // If the proposal was queued, cancel its timelock operations
         if proposal_mut.queued {
@@ -1197,6 +1271,8 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(proposal_id), &proposal_mut);
+        // Extend TTL to cover full proposal lifecycle
+        Self::extend_proposal_ttl(&env, proposal_id, &proposal_mut);
 
         // Cancel all timelock operations associated with this proposal
         let gov_addr = env.current_contract_address();
@@ -3100,6 +3176,79 @@ mod test {
 
         // Attempt to vote again should panic
         client.cast_vote(&voter, &proposal_id, &VoteSupport::Against);
+    }
+
+    #[test]
+    fn test_long_running_proposal_ttl_extended() {
+        // Regression test for: Proposal storage TTL not extended — long-running proposals can expire before execution
+        // This test verifies that proposals with long voting periods have their storage TTL extended
+        // to prevent expiration mid-lifecycle.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(GovernorContract, ());
+        let client = GovernorContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let votes_token_id = env.register(MockVotesContract, ());
+        let timelock = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        // Initialize with long voting period: 30 days ≈ 259,200 ledgers (at 10 sec blocks)
+        let long_voting_period = 259_200u32;
+        let voting_delay = 100u32;
+        
+        client.initialize(
+            &admin,
+            &votes_token_id,
+            &timelock,
+            &voting_delay,
+            &long_voting_period,
+            &50,
+            &1000,
+            &guardian,
+            &VoteType::Extended,
+            &120_960, // grace period
+        );
+
+        // Create proposal — should extend TTL
+        let proposal_id = propose_dummy(&env, &client, &proposer);
+
+        // Verify proposal is created successfully
+        let state = client.state(&proposal_id);
+        assert_eq!(state, ProposalState::Pending);
+
+        // Advance to active state (voting_delay ledgers)
+        env.ledger().with_mut(|li| li.sequence_number += voting_delay + 1);
+        assert_eq!(client.state(&proposal_id), ProposalState::Active);
+
+        // Cast vote — should extend TTL again
+        client.cast_vote(&voter, &proposal_id, &VoteSupport::For);
+
+        // Verify votes are recorded
+        let (votes_for, _, _) = client.proposal_votes(&proposal_id);
+        assert_eq!(votes_for, 1_000_000);
+
+        // Advance well into the long voting period (but not past end)
+        let mid_voting_period = voting_delay + (long_voting_period / 2);
+        env.ledger().with_mut(|li| li.sequence_number = mid_voting_period);
+
+        // Should still be Active — if TTL wasn't extended, storage might expire
+        let state = client.state(&proposal_id);
+        assert_eq!(state, ProposalState::Active);
+
+        // Advance to end of voting period
+        env.ledger().with_mut(|li| li.sequence_number = voting_delay + long_voting_period + 1);
+
+        // Should transition to Succeeded (since quorum was met and votes_for > votes_against)
+        let state = client.state(&proposal_id);
+        assert_eq!(state, ProposalState::Succeeded);
+
+        // Verify that get_proposal still works after long period
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.votes_for, 1_000_000);
+        assert!(!proposal.executed);
     }
 }
 
