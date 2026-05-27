@@ -284,7 +284,13 @@ impl GovernorFactoryContract {
 
         env.events().publish(
             (symbol_short!("deploy"),),
-            (id, governor_addr, timelock_addr, token_votes_addr, deployer),
+            (
+                id,
+                governor_addr.clone(),
+                timelock_addr.clone(),
+                token_votes_addr.clone(),
+                deployer.clone(),
+            ),
         );
 
         id
