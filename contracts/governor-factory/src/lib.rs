@@ -271,10 +271,10 @@ impl GovernorFactoryContract {
 
         let entry = GovernorEntry {
             id,
-            governor: governor_addr,
-            timelock: timelock_addr,
-            token: token_votes_addr,
-            deployer,
+            governor: governor_addr.clone(),
+            timelock: timelock_addr.clone(),
+            token: token_votes_addr.clone(),
+            deployer: deployer.clone(),
         };
 
         env.storage()
