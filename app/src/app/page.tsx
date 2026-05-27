@@ -8,8 +8,10 @@ import { useState, useEffect, useMemo, Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { GovernorClient, ProposalState, Network } from "@nebgov/sdk";
+import { ErrorState } from "../components/ErrorState";
 import { ProposalCardSkeleton } from "../components/ui/ProposalCardSkeleton";
 import { useDebounce } from "../hooks/useDebounce";
+import { getErrorMessage, reportFrontendError } from "../lib/frontend-error";
 
 
 interface ProposalSummary {
@@ -223,8 +225,14 @@ function ProposalsPageInner() {
         setHasMore(false);
       }
     } catch (err) {
-      console.error("Error fetching proposals:", err);
-      setError(err instanceof Error ? err.message : "Failed to load proposals");
+      reportFrontendError("proposals_page_load", err, {
+        append,
+        cursor,
+        search,
+        stateFilter,
+        sort,
+      });
+      setError(getErrorMessage(err));
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -318,12 +326,12 @@ function ProposalsPageInner() {
 
       {/* Error */}
       {error && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
-          <p className="text-red-800 text-sm font-medium">
-            Error loading proposals
-          </p>
-          <p className="text-red-600 text-sm mt-1">{error}</p>
-        </div>
+        <ErrorState
+          title="Error loading proposals"
+          message={error}
+          onRetry={() => fetchProposals()}
+          className="mb-6"
+        />
       )}
 
       {/* Loading skeleton */}
