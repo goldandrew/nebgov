@@ -18,7 +18,7 @@
 //! - traders must authorize `swap`
 //! - only the configured governor may call `update_pool_fee`
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracterror, contracttype, Address, Env};
 
 const MIN_LIQUIDITY: i128 = 1_000;
 const DEFAULT_FEE_BPS: u32 = 30;
@@ -44,6 +44,16 @@ enum DataKey {
     Governor,
     Pool(u32, u32),
     Position(Address, u32, u32),
+}
+
+/// Liquidity contract error codes.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiquidityError {
+    /// Amount must be positive (not zero or negative).
+    InvalidAmount = 1,
+    /// Caller does not have sufficient LP shares for this operation.
+    InsufficientShares = 2,
 }
 
 #[contract]
@@ -123,8 +133,15 @@ impl LiquidityContract {
     ) -> (i128, i128) {
         provider.require_auth();
 
+        // Security: validate caller inputs before any state mutation or token transfer.
+        // A failed check here leaves contract state unchanged.
         if lp_tokens <= 0 {
-            panic!("lp_tokens must be positive");
+            panic!("invalid amount");
+        }
+
+        let provider_shares = Self::get_lp_position(env.clone(), provider.clone(), outcome_a, outcome_b);
+        if lp_tokens > provider_shares {
+            panic!("insufficient shares");
         }
 
         let pool_key = Self::pool_key(outcome_a, outcome_b);
@@ -140,10 +157,6 @@ impl LiquidityContract {
             .persistent()
             .get(&position_key)
             .expect("no LP position");
-
-        if position.lp_tokens < lp_tokens {
-            panic!("insufficient LP tokens");
-        }
 
         let amount_a = (lp_tokens * pool.reserve_a) / pool.total_lp_supply;
         let amount_b = (lp_tokens * pool.reserve_b) / pool.total_lp_supply;
