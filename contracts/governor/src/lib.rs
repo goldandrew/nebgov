@@ -1,5 +1,8 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
+// Prevent future introduction of dead match patterns in this security-critical
+// state machine (issue #439).
+#![deny(unreachable_patterns)]
 
 mod events;
 
@@ -41,6 +44,13 @@ pub enum GovernorError {
     VotesTokenNotSet = 25,
     PauserNotSet = 26,
     ArithmeticOverflow = 27,
+    /// Proposal contains more calldata entries than the on-chain maximum.
+    ///
+    /// Even when every individual calldata entry is within `MaxCalldataSize`,
+    /// a proposal with thousands of tiny entries can exhaust the Soroban
+    /// compute budget during `execute()`.  This error is returned by
+    /// `propose()` when `calldata.len() > MAX_CALLDATA_COUNT`.
+    TooManyCalldataEntries = 28,
 }
 
 /// Cross-contract interface for the Timelock contract.
@@ -529,6 +539,20 @@ impl GovernorContract {
             if calldata.len() > max_calldata_size {
                 env.panic_with_error(GovernorError::CalldataTooLarge);
             }
+        }
+
+        // Validate calldata count (Issue #447)
+        //
+        // MaxCalldataSize limits the byte size of each individual calldata entry,
+        // but does not bound the *number* of entries.  A proposal with thousands
+        // of tiny entries would pass the size check yet exhaust the Soroban
+        // compute budget when execute() iterates and dispatches every entry.
+        //
+        // 10 is a conservative upper bound that covers all realistic batch
+        // governance proposals while preventing compute-exhaustion attacks.
+        const MAX_CALLDATA_COUNT: u32 = 10;
+        if calldatas.len() > MAX_CALLDATA_COUNT {
+            env.panic_with_error(GovernorError::TooManyCalldataEntries);
         }
 
         // Rate limiting checks (Issue #188)
@@ -1312,9 +1336,13 @@ impl GovernorContract {
         } else if !quorum_met || against_wins_or_ties {
             ProposalState::Defeated
         } else {
-            // Defensive fallback: with quorum_met=false or against_wins_or_ties=true,
-            // we must have already returned Defeated above.
-            ProposalState::Defeated
+            // This branch is structurally unreachable: the outer condition
+            // `!(quorum_met && for_wins)` means at least one of `!quorum_met`
+            // or `against_wins_or_ties` is true, so the `else if` above always
+            // matches first.  The `unreachable!()` here documents that intent
+            // and will panic loudly if a future refactor accidentally makes
+            // this path reachable (issue #439).
+            unreachable!("state machine invariant violated: defeated branch must have been taken")
         }
     }
 
