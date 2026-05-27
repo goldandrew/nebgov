@@ -13,6 +13,7 @@ const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const TOPICS = {
   proposalCreated: "ProposalCreated",
   voteCast: "VoteCast",
+  voteCastWithReason: "VoteCastWithReason",
   proposalQueued: "ProposalQueued",
   proposalExecuted: "ProposalExecuted",
   proposalCancelled: "ProposalCancelled",
@@ -49,6 +50,14 @@ export interface VoteCastEventData {
   voter: string;
   support: number;
   weight: bigint;
+}
+
+export interface VoteCastWithReasonEventData {
+  proposalId: bigint;
+  voter: string;
+  support: number;
+  weight: bigint;
+  reason: string;
 }
 
 export interface ProposalQueuedEventData {
@@ -378,6 +387,26 @@ export function parseVoteCastEvent(event: SorobanEvent): VoteCastEventData | nul
   };
 }
 
+export function parseVoteCastWithReasonEvent(
+  event: SorobanEvent
+): VoteCastWithReasonEventData | null {
+  if (event.topic[0] !== TOPICS.voteCastWithReason || !isRecord(event.value)) return null;
+
+  const proposalId = toBigInt(event.value.proposal_id);
+  const support = toNumber(event.value.support);
+  const weight = toBigInt(event.value.weight);
+
+  if (proposalId === null || support === null || weight === null) return null;
+
+  return {
+    proposalId,
+    voter: String(event.value.voter ?? ""),
+    support,
+    weight,
+    reason: String(event.value.reason ?? ""),
+  };
+}
+
 export function parseProposalQueuedEvent(
   event: SorobanEvent
 ): ProposalQueuedEventData | null {
@@ -500,6 +529,21 @@ export function subscribeToVotes(
     callback,
     opts,
     (event) => parseVoteCastEvent(event)?.proposalId === proposalId
+  );
+}
+
+export function subscribeToVoteCastWithReason(
+  governorAddress: string,
+  proposalId: bigint,
+  callback: (event: SorobanEvent) => void,
+  opts: SubscriptionOptions
+): () => void {
+  return createTopicSubscription(
+    governorAddress,
+    TOPICS.voteCastWithReason,
+    callback,
+    opts,
+    (event) => parseVoteCastWithReasonEvent(event)?.proposalId === proposalId
   );
 }
 
