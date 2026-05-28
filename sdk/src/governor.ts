@@ -1444,7 +1444,7 @@ export class GovernorClient {
     proposalId: bigint, 
     indexerUrl?: string
   ): Promise<any | null> {
-    const url = indexerUrl || process.env.INDEXER_API_URL;
+    const url = indexerUrl || this.config.indexerUrl;
     
     if (!url) {
       // No indexer configured, fall back to on-chain query

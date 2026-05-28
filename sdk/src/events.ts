@@ -38,6 +38,8 @@ export interface ProposalCreatedEventData {
   proposalId: bigint;
   proposer: string;
   description: string;
+  descriptionHash: string;
+  metadataUri: string;
   targets: unknown[];
   fnNames: unknown[];
   calldatas: unknown[];
@@ -344,6 +346,8 @@ export function parseProposalCreatedEvent(
     proposalId,
     proposer: String(event.value.proposer ?? ""),
     description: String(event.value.description ?? ""),
+    descriptionHash: String(event.value.description_hash ?? ""),
+    metadataUri: String(event.value.metadata_uri ?? ""),
     targets: Array.isArray(event.value.targets) ? event.value.targets : [],
     fnNames: Array.isArray(event.value.fn_names) ? event.value.fn_names : [],
     calldatas: Array.isArray(event.value.calldatas) ? event.value.calldatas : [],
