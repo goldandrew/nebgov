@@ -1129,31 +1129,33 @@ export class GovernorClient {
    * The quorum is calculated based on the total supply at the proposal's start ledger.
    */
   async getQuorum(proposalId: bigint): Promise<bigint> {
-    const result = await this.server.simulateTransaction(
-      new TransactionBuilder(
-        await this.server.getAccount(this.config.governorAddress),
-        { fee: BASE_FEE, networkPassphrase: this.networkPassphrase },
-      )
-        .addOperation(
-          this.contract.call(
-            "get_quorum",
-            nativeToScVal(proposalId, { type: "u64" }),
-          ),
+    return this.retry(async () => {
+      const result = await this.server.simulateTransaction(
+        new TransactionBuilder(
+          await this.server.getAccount(this.config.governorAddress),
+          { fee: BASE_FEE, networkPassphrase: this.networkPassphrase },
         )
-        .setTimeout(30)
-        .build(),
-    );
+          .addOperation(
+            this.contract.call(
+              "get_quorum",
+              nativeToScVal(proposalId, { type: "u64" }),
+            ),
+          )
+          .setTimeout(30)
+          .build(),
+      );
 
-    if (SorobanRpc.Api.isSimulationError(result)) {
-      throw new Error(`Simulation error: ${result.error}`);
-    }
+      if (SorobanRpc.Api.isSimulationError(result)) {
+        throw new Error(`Simulation error: ${result.error}`);
+      }
 
-    const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-      .result?.retval;
-    if (!raw) throw new Error("No return value");
+      const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+        .result?.retval;
+      if (!raw) throw new Error("No return value");
 
-    const quorum = BigInt(scValToNative(raw));
-    return quorum;
+      const quorum = BigInt(scValToNative(raw));
+      return quorum;
+    });
   }
 
   /**
@@ -1315,6 +1317,7 @@ export class GovernorClient {
     // Fallback to event scanning
     return this.retry(async () => {
       const events = await this.server.getEvents({
+        startLedger: opts?.fromLedger ?? 1,
         filters: [
           {
             type: "contract",
@@ -1322,21 +1325,19 @@ export class GovernorClient {
             topics: [["VoteCast", "vote"], [voter]],
           },
         ],
-        pagination: {
-          limit: limit * 2, // Fetch extra to filter for relevant events
-        },
+        limit: limit * 2,
       });
 
       const history: VotingHistoryEntry[] = [];
       for (const event of events.events) {
         if (!event.topic || event.topic.length < 2) continue;
-        
+
         // Check if voter matches (second topic)
         const voterTopic = scValToNative(event.topic[1]);
         if (String(voterTopic) !== voter) continue;
 
         // Parse event data
-        const data = event.value?.body?.val;
+        const data = event.value;
         if (!data) continue;
 
         const native = scValToNative(data) as Record<string, unknown>;
@@ -2047,23 +2048,25 @@ export class GovernorClient {
    * Returns 0 if the proposal was not queued.
    */
   async getQueueTime(proposalId: bigint): Promise<number> {
-    const result = await this.server.simulateTransaction(
-      new TransactionBuilder(
-        await this.server.getAccount(this.readAccount()),
-        { fee: BASE_FEE, networkPassphrase: this.networkPassphrase }
-      )
-        .addOperation(
-          this.contract.call("get_queue_time", nativeToScVal(proposalId, { type: "u64" }))
+    return this.retry(async () => {
+      const result = await this.server.simulateTransaction(
+        new TransactionBuilder(
+          await this.server.getAccount(this.readAccount()),
+          { fee: BASE_FEE, networkPassphrase: this.networkPassphrase }
         )
-        .setTimeout(30)
-        .build()
-    );
+          .addOperation(
+            this.contract.call("get_queue_time", nativeToScVal(proposalId, { type: "u64" }))
+          )
+          .setTimeout(30)
+          .build()
+      );
 
-    if (SorobanRpc.Api.isSimulationError(result)) return 0;
+      if (SorobanRpc.Api.isSimulationError(result)) return 0;
 
-    const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-      .result?.retval;
-    return raw ? (scValToNative(raw) as number) : 0;
+      const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+        .result?.retval;
+      return raw ? (scValToNative(raw) as number) : 0;
+    });
   }
 
   /**

@@ -351,6 +351,11 @@ export default function ProposalDetailClient({ params }: Props) {
   const totalVotes =
     proposal.votesFor + proposal.votesAgainst + proposal.votesAbstain;
 
+  const quorumVotes = proposal.votesFor + proposal.votesAbstain;
+  const quorumPercentage =
+    quorumValue > 0n ? Math.min(100, Number((quorumVotes * 100n) / quorumValue)) : 0;
+  const quorumColor = quorumReached ? "bg-green-500" : "bg-blue-500";
+
   async function handleCastVote() {
     if (selectedSupport === null || !governorClient || !publicKey || isVoting)
       return;
@@ -837,7 +842,7 @@ export default function ProposalDetailClient({ params }: Props) {
                     Connect your wallet to vote on this proposal
                   </p>
                   <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                    You'll need GOV tokens to participate.
+                    {"You'll"} need GOV tokens to participate.
                   </p>
                 </div>
 
