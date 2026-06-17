@@ -100,11 +100,7 @@ fn test_flow_2_lock_withdrawal_fails() {
     wrapper_client.lock_withdrawal(&admin, &user, &100);
 
     // Withdrawal should fail
-    let result = env.as_contract(&wrapper_id, || {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wrapper_client.withdraw(&user, &500);
-        }))
-    });
+    let result = wrapper_client.try_withdraw(&user, &500);
     assert!(result.is_err());
 }
 

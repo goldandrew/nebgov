@@ -387,9 +387,7 @@ fn test_remove_liquidity_state_unchanged_on_invalid_amount_guard() {
     let initial_pool = client.get_pool(&0, &1);
     
     // Attempt invalid removal (zero shares) - will panic
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.remove_liquidity(&provider, &0, &1, &0);
-    }));
+    let result = client.try_remove_liquidity(&provider, &0, &1, &0);
     assert!(result.is_err());
     
     // Verify state is unchanged after failed guard
@@ -413,9 +411,7 @@ fn test_remove_liquidity_state_unchanged_on_insufficient_shares_guard() {
     let initial_pool = client.get_pool(&0, &1);
     
     // Attempt invalid removal (balance exceeded) - will panic
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.remove_liquidity(&provider, &0, &1, &10_001);
-    }));
+    let result = client.try_remove_liquidity(&provider, &0, &1, &10_001);
     assert!(result.is_err());
     
     // Verify state is unchanged after failed guard
