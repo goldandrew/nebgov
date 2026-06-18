@@ -1562,15 +1562,18 @@ fn test_unpause_via_governance_restores_functionality() {
         &blocked_fns,
         &blocked_datas,
     );
+    // propose() is intentionally NOT gated by the paused flag — the DAO must
+    // still be able to submit an emergency unpause proposal while paused.
     assert!(
-        result.is_err(),
-        "propose should fail while contract is paused"
+        result.is_ok(),
+        "propose should succeed while paused so the DAO can vote on an unpause"
     );
 
     // Unpause directly — governance self-calls are blocked by re-entry
     // protection, so the pauser/admin calls unpause() directly (auth mocked).
     // This mirrors how a contract upgrade or admin action would unpause.
-    GovernorContractClient::new(&env, &governor_id).unpause();
+    // admin is the initial pauser (set in initialize); unpause must use the same address.
+    GovernorContractClient::new(&env, &governor_id).unpause(&admin);
     assert!(
         !governor_client.is_paused(),
         "contract should be unpaused after direct unpause"
@@ -1673,6 +1676,7 @@ fn test_set_pauser_requires_self_auth() {
     let votes_client = TokenVotesContractClient::new(&env, &votes_id);
 
     let timelock_id = env.register(TimelockContract, ());
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
     let governor_id = env.register(GovernorContract, ());
     let governor_client = GovernorContractClient::new(&env, &governor_id);
 
