@@ -47,6 +47,8 @@ pub enum GovernorError {
     VotePeriodTooShort = 28,
     ExecutionWindowZero = 29,
     TooManyCalldataEntries = 30,
+    /// Vote was cast outside the proposal's Active voting window.
+    ProposalNotActive = 31,
 }
 
 /// Cross-contract interface for the Timelock contract.
@@ -765,6 +767,18 @@ impl GovernorContract {
 
         let mut proposal = Self::must_get_proposal(&env, proposal_id);
 
+        // Reject votes outside the Active window. Checking fields directly
+        // avoids a redundant storage read that Self::state() would incur.
+        let current = env.ledger().sequence();
+        if proposal.cancelled
+            || proposal.executed
+            || proposal.queued
+            || current < proposal.start_ledger
+            || current > proposal.end_ledger
+        {
+            env.panic_with_error(GovernorError::ProposalNotActive);
+        }
+
         // Look up the voter's snapshot voting power at the proposal's start ledger
         // using the active voting strategy (single token or multi-token weighted).
         let raw_weight: i128 = Self::compute_votes(&env, &voter, &proposal.start_ledger);
@@ -834,6 +848,17 @@ impl GovernorContract {
         }
 
         let mut proposal = Self::must_get_proposal(&env, proposal_id);
+
+        // Reject votes outside the Active window.
+        let current = env.ledger().sequence();
+        if proposal.cancelled
+            || proposal.executed
+            || proposal.queued
+            || current < proposal.start_ledger
+            || current > proposal.end_ledger
+        {
+            env.panic_with_error(GovernorError::ProposalNotActive);
+        }
 
         // Look up the voter's snapshot voting power at the proposal's start ledger
         let raw_weight: i128 = Self::compute_votes(&env, &voter, &proposal.start_ledger);
@@ -2314,6 +2339,9 @@ mod test {
 
         let proposal_id = propose_dummy(&env, &client, &proposer);
 
+        // voting_delay = 100: advance past start_ledger so the proposal is Active.
+        env.ledger().with_mut(|l| l.sequence_number += 101);
+
         let reason = String::from_str(&env, "I support this because it improves governance");
         client.cast_vote_with_reason(&voter, &proposal_id, &VoteSupport::For, &reason);
 
@@ -2398,6 +2426,9 @@ mod test {
         );
 
         let proposal_id = propose_dummy(&env, &client, &proposer);
+
+        // voting_delay = 100: advance past start_ledger so the proposal is Active.
+        env.ledger().with_mut(|l| l.sequence_number += 101);
 
         let reason1 = String::from_str(&env, "I agree with this proposal");
         let reason2 = String::from_str(&env, "I disagree with this proposal");
