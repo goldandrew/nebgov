@@ -1322,7 +1322,9 @@ export class GovernorClient {
             topics: [["VoteCast", "vote"], [voter]],
           },
         ],
-        limit: limit * 2, // Fetch extra to filter for relevant events
+        pagination: {
+          limit: limit * 2, // Fetch extra to filter for relevant events
+        },
       });
 
       const history: VotingHistoryEntry[] = [];
@@ -1334,7 +1336,10 @@ export class GovernorClient {
         if (String(voterTopic) !== voter) continue;
 
         // Parse event data
-        const native = scValToNative(event.value) as Record<string, unknown>;
+        const data = event.value?.body?.val;
+        if (!data) continue;
+
+        const native = scValToNative(data) as Record<string, unknown>;
         const proposalId = toBigInt(native.proposal_id ?? native.proposalId);
         const supportRaw = native.support ?? native.support;
         const support = typeof supportRaw === "number" 

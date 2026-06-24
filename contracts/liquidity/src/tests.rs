@@ -274,7 +274,7 @@ fn test_remove_liquidity_rejects_zero_shares() {
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-
+    
     // Attempt to remove zero shares - should panic with InvalidAmount
     client.remove_liquidity(&provider, &0, &1, &0);
 }
@@ -286,7 +286,7 @@ fn test_remove_liquidity_rejects_negative_shares() {
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-
+    
     // Attempt to remove negative shares - should panic with InvalidAmount
     client.remove_liquidity(&provider, &0, &1, &-1);
 }
@@ -300,7 +300,7 @@ fn test_remove_liquidity_rejects_excessive_shares() {
     // Provider adds 100 LP tokens
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     assert_eq!(client.get_lp_position(&provider, &0, &1), 10_000);
-
+    
     // Attempt to remove 10_001 shares (exceeds balance of 10_000) - should panic with InsufficientShares
     client.remove_liquidity(&provider, &0, &1, &10_001);
 }
@@ -314,10 +314,10 @@ fn test_remove_liquidity_rejects_zero_share_provider_positive_amount() {
 
     // Setup: provider1 adds liquidity
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-
+    
     // other_provider has zero LP shares (never added liquidity)
     assert_eq!(client.get_lp_position(&other_provider, &0, &1), 0);
-
+    
     // Attempt to remove positive shares as other_provider (who has 0 balance) - should panic with InsufficientShares
     client.remove_liquidity(&other_provider, &0, &1, &1);
 }
@@ -333,14 +333,14 @@ fn test_remove_liquidity_valid_exact_balance() {
 
     // Remove exact balance (10_000 shares)
     let (amount_a, amount_b) = client.remove_liquidity(&provider, &0, &1, &10_000);
-
+    
     // Verify correct amounts returned (should be proportional to 100% of reserves)
     assert_eq!(amount_a, 10_000);
     assert_eq!(amount_b, 10_000);
-
+    
     // Verify provider's balance is now 0
     assert_eq!(client.get_lp_position(&provider, &0, &1), 0);
-
+    
     // Verify pool reserves are depleted
     let pool = client.get_pool(&0, &1);
     assert_eq!(pool.reserve_a, 0);
@@ -359,14 +359,14 @@ fn test_remove_liquidity_valid_partial_removal() {
 
     // Remove 50% (5_000 shares)
     let (amount_a, amount_b) = client.remove_liquidity(&provider, &0, &1, &5_000);
-
+    
     // Verify correct amounts returned (50% of reserves)
     assert_eq!(amount_a, 5_000);
     assert_eq!(amount_b, 5_000);
-
+    
     // Verify provider's remaining balance is 50%
     assert_eq!(client.get_lp_position(&provider, &0, &1), 5_000);
-
+    
     // Verify pool reserves are reduced by 50%
     let pool = client.get_pool(&0, &1);
     assert_eq!(pool.reserve_a, 5_000);
@@ -381,15 +381,15 @@ fn test_remove_liquidity_state_unchanged_on_invalid_amount_guard() {
 
     // Setup: provider adds 10_000 LP tokens
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-
+    
     // Record initial state
     let initial_balance = client.get_lp_position(&provider, &0, &1);
     let initial_pool = client.get_pool(&0, &1);
-
+    
     // Attempt invalid removal (zero shares) - will panic
     let result = client.try_remove_liquidity(&provider, &0, &1, &0);
     assert!(result.is_err());
-
+    
     // Verify state is unchanged after failed guard
     assert_eq!(client.get_lp_position(&provider, &0, &1), initial_balance);
     let pool_after = client.get_pool(&0, &1);
@@ -405,15 +405,15 @@ fn test_remove_liquidity_state_unchanged_on_insufficient_shares_guard() {
 
     // Setup: provider adds 10_000 LP tokens
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-
+    
     // Record initial state
     let initial_balance = client.get_lp_position(&provider, &0, &1);
     let initial_pool = client.get_pool(&0, &1);
-
+    
     // Attempt invalid removal (balance exceeded) - will panic
     let result = client.try_remove_liquidity(&provider, &0, &1, &10_001);
     assert!(result.is_err());
-
+    
     // Verify state is unchanged after failed guard
     assert_eq!(client.get_lp_position(&provider, &0, &1), initial_balance);
     let pool_after = client.get_pool(&0, &1);
