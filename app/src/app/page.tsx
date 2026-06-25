@@ -13,6 +13,7 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { ProposalCardSkeleton } from "../components/ui/ProposalCardSkeleton";
 import { useDebounce } from "../hooks/useDebounce";
 import { getErrorMessage, reportFrontendError } from "../lib/frontend-error";
+import { ProposalStateBadge } from "../components/ProposalStateBadge";
 
 
 interface ProposalSummary {
@@ -426,7 +427,7 @@ function ProposalsPageInner() {
                     role="status"
                     aria-label={`Proposal status: ${p.state}`}
                   >
-                    {p.state}
+                    <ProposalStateBadge state={p.state} />
                   </span>
                 </div>
               </Link>
