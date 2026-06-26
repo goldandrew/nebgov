@@ -98,12 +98,18 @@ fi
 # ---- Build WASM contracts -------------------------------------------
 WASM_DIR="$ROOT_DIR/target/wasm32v1-none/release"
 
+# Ensure the target is installed so the build doesn't fail with a cryptic error
+if ! rustup target list --installed | grep -q 'wasm32v1-none'; then
+  info "Installing wasm32v1-none target..."
+  rustup target add wasm32v1-none
+fi
+
 info "Building WASM contracts (release) ..."
 cargo build --release --target wasm32v1-none --manifest-path "$ROOT_DIR/Cargo.toml" --workspace
 ok "WASM build complete"
 
 # Verify expected artefacts exist
-for wasm in sorogov_token_votes sorogov_timelock sorogov_governor sorogov_treasury sorogov_governor_factory; do
+for wasm in sorogov_token_votes sorogov_timelock sorogov_governor sorogov_treasury sorogov_governor_factory sorogov_liquidity; do
   [[ -f "$WASM_DIR/${wasm}.wasm" ]] || fail "Expected WASM not found: $WASM_DIR/${wasm}.wasm"
 done
 
@@ -160,6 +166,9 @@ deploy_contract "$WASM_DIR/sorogov_treasury.wasm" "TREASURY_ADDRESS"
 
 # 5. Factory
 deploy_contract "$WASM_DIR/sorogov_governor_factory.wasm" "FACTORY_ADDRESS"
+
+# 6. Liquidity
+deploy_contract "$WASM_DIR/sorogov_liquidity.wasm" "LIQUIDITY_ADDRESS"
 
 # ====================================================================
 # Initialize contracts (idempotent — each checks storage internally)
@@ -302,6 +311,7 @@ info "  Timelock Exec Window . $TIMELOCK_WINDOW seconds"
 info "  Governor ............. $GOVERNOR_ADDRESS"
 info "  Treasury ............. $TREASURY_ADDRESS"
 info "  Factory .............. $FACTORY_ADDRESS"
+info "  Liquidity ............ $LIQUIDITY_ADDRESS"
 info "  Env file ............. $ENV_FILE"
 info "============================================================"
 printf '\n'

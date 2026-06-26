@@ -83,6 +83,34 @@ describe("Competition Endpoints", () => {
 
       expect(response.body.error).toBe("Competition not found");
     });
+
+    it("should fail when competition has ended", async () => {
+      const expiredResult = await pool.query(
+        `INSERT INTO competitions (name, description, entry_fee, start_date, end_date, is_active, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [
+          "Expired Competition",
+          null,
+          0,
+          new Date(Date.now() - 172800000),
+          new Date(Date.now() - 86400000),
+          true,
+          userId,
+        ],
+      );
+      const expiredId = expiredResult.rows[0].id;
+
+      try {
+        const response = await request(app)
+          .post(`/competitions/${expiredId}/join`)
+          .set("Authorization", `Bearer ${authToken}`)
+          .expect(400);
+
+        expect(response.body.error).toBe("Competition has ended");
+      } finally {
+        await pool.query("DELETE FROM competitions WHERE id = $1", [expiredId]);
+      }
+    });
   });
 
   describe("DELETE /competitions/:id/leave", () => {
