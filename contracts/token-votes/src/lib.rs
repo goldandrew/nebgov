@@ -53,9 +53,13 @@ impl TokenVotesContract {
             .instance()
             .set(&DataKey::CheckpointRetentionPeriod, &100800u32);
         // Default time-weighting to disabled
-        env.storage().instance().set(&DataKey::TimeWeightEnabled, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightEnabled, &false);
         // Default scale to 4,204,800 (~1 year at 7.5s per ledger)
-        env.storage().instance().set(&DataKey::TimeWeightScale, &4204800u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightScale, &4204800u32);
     }
 
     /// Delegate voting power from caller to delegatee.
@@ -182,8 +186,18 @@ impl TokenVotesContract {
 
         if let Some(old_delegatee) = previous_delegate.clone() {
             if old_delegatee != delegatee {
-                Self::update_account_votes(env, old_delegatee.clone(), -record.balance, -old_weighted_sum);
-                Self::update_account_votes(env, delegatee.clone(), new_record.balance, new_weighted_sum);
+                Self::update_account_votes(
+                    env,
+                    old_delegatee.clone(),
+                    -record.balance,
+                    -old_weighted_sum,
+                );
+                Self::update_account_votes(
+                    env,
+                    delegatee.clone(),
+                    new_record.balance,
+                    new_weighted_sum,
+                );
             } else {
                 let delta = new_record.balance - record.balance;
                 let delta_ws = new_weighted_sum - old_weighted_sum;
@@ -235,7 +249,12 @@ impl TokenVotesContract {
             let weighted_sum = record.balance * record.start_ledger as i128;
             if record.balance > 0 {
                 // Remove voting power from the previous delegate and total supply.
-                Self::update_account_votes(&env, old_delegatee.clone(), -record.balance, -weighted_sum);
+                Self::update_account_votes(
+                    &env,
+                    old_delegatee.clone(),
+                    -record.balance,
+                    -weighted_sum,
+                );
                 Self::update_total_supply_checkpoint(&env, -record.balance, -weighted_sum);
             }
 
@@ -320,7 +339,10 @@ impl TokenVotesContract {
     /// Get voting power at a past ledger sequence (snapshot).
     pub fn get_past_votes(env: Env, account: Address, ledger: u32) -> i128 {
         let current_ledger = env.ledger().sequence();
-        assert!(ledger <= current_ledger, "ledger must not exceed current ledger");
+        assert!(
+            ledger <= current_ledger,
+            "ledger must not exceed current ledger"
+        );
 
         let key = DataKey::Checkpoints(account);
         let checkpoints: soroban_sdk::Vec<Checkpoint> = env
@@ -365,7 +387,7 @@ impl TokenVotesContract {
             .persistent()
             .get(&DataKey::TotalCheckpoints)
             .unwrap_or(soroban_sdk::Vec::new(&env));
-        
+
         let cp = Self::binary_search(&checkpoints, ledger);
         if cp.votes <= 0 {
             return 0;
@@ -389,7 +411,7 @@ impl TokenVotesContract {
             .unwrap_or(soroban_sdk::Vec::new(&env));
 
         let current_ledger = env.ledger().sequence();
-        
+
         // When using raw checkpoint manually, we assume no weighted sum change for simplicity
         // or we try to estimate it based on last checkpoint.
         let weighted_sum = if checkpoints.is_empty() {
@@ -432,7 +454,7 @@ impl TokenVotesContract {
             .persistent()
             .get(&DataKey::TotalCheckpoints)
             .unwrap_or(soroban_sdk::Vec::new(env));
- 
+
         let current_ledger = env.ledger().sequence();
         let (old_votes, old_weighted_sum) = if checkpoints.is_empty() {
             (0, 0)
@@ -442,7 +464,7 @@ impl TokenVotesContract {
         };
         let new_total = old_votes + delta;
         let new_weighted_sum = old_weighted_sum + delta_weighted_sum;
- 
+
         if !checkpoints.is_empty() && checkpoints.last().unwrap().ledger == current_ledger {
             let last_idx = checkpoints.len() - 1;
             checkpoints.set(
@@ -460,7 +482,7 @@ impl TokenVotesContract {
                 weighted_sum: new_weighted_sum,
             });
         }
- 
+
         env.storage()
             .persistent()
             .set(&DataKey::TotalCheckpoints, &checkpoints);
@@ -684,7 +706,9 @@ impl TokenVotesContract {
             .expect("not initialized");
         admin.require_auth();
 
-        env.storage().instance().set(&DataKey::TimeWeightEnabled, &enabled);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightEnabled, &enabled);
     }
 
     /// Get whether time-weighted voting is enabled.
@@ -1915,7 +1939,6 @@ mod tests {
         let empty: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
         client.delegate_batch(&delegator, &empty);
     }
-
 }
 
 #[cfg(test)]

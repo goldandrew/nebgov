@@ -121,8 +121,8 @@ describe("FactoryClient", () => {
       mockSimulate.mockResolvedValueOnce(responseEntry);
     }
 
-    scValToNative.mockImplementation((raw: unknown) => {
-      if (typeof raw === "object" && raw?.toString?.() === "ScVal") {
+    scValToNative.mockImplementation((raw: any) => {
+      if (typeof raw === "object" && raw !== null && raw.switch && raw.switch().name === "scvMap") {
         return { id: 1n, governor: "G1", timelock: "T1", token: "TO1", deployer: "D1" };
       }
       return 55n;
@@ -151,8 +151,8 @@ describe("FactoryClient", () => {
       mockSimulate.mockResolvedValueOnce(responseEntry);
     }
 
-    scValToNative.mockImplementation((raw: unknown) => {
-      if (typeof raw === "object" && raw?.toString?.() === "ScVal") {
+    scValToNative.mockImplementation((raw: any) => {
+      if (typeof raw === "object" && raw !== null && raw.switch && raw.switch().name === "scvMap") {
         return { id: 6n, governor: "G6", timelock: "T6", token: "TO6", deployer: "D6" };
       }
       return 10n;

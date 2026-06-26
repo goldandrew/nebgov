@@ -3815,10 +3815,10 @@ mod test {
             &admin,
             &votes_token_id,
             &timelock,
-            &0,    // voting_delay
-            &1,    // voting_period (minimal so proposals don't overlap)
-            &0,    // quorum_numerator
-            &0,    // proposal_threshold
+            &0, // voting_delay
+            &1, // voting_period (minimal so proposals don't overlap)
+            &0, // quorum_numerator
+            &0, // proposal_threshold
             &guardian,
             &VoteType::Simple,
             &120_960,

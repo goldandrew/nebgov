@@ -191,16 +191,20 @@ function toGovernorSettings(value: unknown): GovernorSettings | null {
   };
 }
 
-function decodeEvent(raw: SorobanRpc.Api.EventResponse): SorobanEvent {
-  const topic = raw.topic.map((segment) => String(scValToNative(segment)));
-  const value = scValToNative(raw.value);
+function decodeEvent(raw: SorobanRpc.Api.EventResponse): SorobanEvent | null {
+  try {
+    const topic = raw.topic.map((segment) => String(scValToNative(segment)));
+    const value = scValToNative(raw.value);
 
-  return {
-    ledger: raw.ledger,
-    contractId: raw.contractId?.contractId() ?? "",
-    topic,
-    value,
-  };
+    return {
+      ledger: raw.ledger,
+      contractId: raw.contractId?.contractId() ?? "",
+      topic,
+      value,
+    };
+  } catch (error) {
+    return null;
+  }
 }
 
 function buildServer(opts: SubscriptionOptions): SorobanRpc.Server {
@@ -285,7 +289,9 @@ export async function fetchEvents(
     });
 
     return {
-      events: (response.events ?? []).map(decodeEvent),
+      events: (response.events ?? [])
+        .map(decodeEvent)
+        .filter((e): e is SorobanEvent => e !== null),
       latestLedger: response.latestLedger ? Number(response.latestLedger) : startLedger,
     };
   }, {

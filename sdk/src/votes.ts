@@ -513,10 +513,8 @@ export class VotesClient {
   async getVotingPowerDistribution(
     fromLedger?: number,
   ): Promise<VotingPowerDistribution> {
-    const [delegationMap, totalSupply] = await Promise.all([
-      this.buildDelegationMap(fromLedger),
-      this.getTotalSupply(),
-    ]);
+    const delegationMap = await this.buildDelegationMap(fromLedger);
+    const totalSupply = await this.getTotalSupply();
 
     if (delegationMap.size === 0) {
       return {
@@ -572,12 +570,13 @@ export class VotesClient {
 
     if (delegators.length === 0) return [];
 
-    const results = await Promise.all(
-      delegators.map(async (delegator) => ({
+    const results: any[] = [];
+    for (const delegator of delegators) {
+      results.push({
         delegator,
         power: await this.getVotes(delegator),
-      })),
-    );
+      });
+    }
 
     return results
       .filter((d) => d.power > 0n)
@@ -600,17 +599,16 @@ export class VotesClient {
     const totalSupply = await this.getTotalSupply();
     if (totalSupply === 0n) return [];
 
-    const delegates = await Promise.all(
-      addresses.map(async (address) => {
-        const votes = await this.getVotes(address);
-        return {
+    const delegates: any[] = [];
+    for (const address of addresses) {
+      const votes = await this.getVotes(address);
+      delegates.push({
           address,
           votes,
           percentOfSupply:
             totalSupply > 0n ? Number((votes * 10000n) / totalSupply) / 100 : 0,
-        };
-      }),
-    );
+      });
+    }
 
     return delegates
       .filter((d) => d.votes > 0n)

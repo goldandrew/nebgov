@@ -152,7 +152,8 @@ fn test_get_past_votes_1000_checkpoints_within_budget() {
 
     // Advance the ledger past the last checkpoint so get_past_votes doesn't
     // panic with "ledger must not exceed current ledger".
-    env.ledger().with_mut(|li| li.sequence_number = max_ledger + 1);
+    env.ledger()
+        .with_mut(|li| li.sequence_number = max_ledger + 1);
 
     // Query at a ledger in the middle of the range — worst-case for binary
     // search is any non-extreme position.

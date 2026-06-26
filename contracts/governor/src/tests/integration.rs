@@ -680,8 +680,7 @@ fn test_cancel_queued_after_window_closes() {
 
     // Advance ledger far past the veto window (min_delay is 100 seconds, roughly 10-20 ledgers)
     // Use a very large advance to ensure we're well past the veto window
-    env.ledger()
-        .with_mut(|l| l.sequence_number += 1000);
+    env.ledger().with_mut(|l| l.sequence_number += 1000);
 
     // Try to cancel after veto window closes — should fail
     governor_client.cancel_queued(&guardian, &proposal_id);
@@ -872,10 +871,8 @@ fn test_multi_token_cast_vote_and_quorum_with_two_weighted_tokens() {
         &120_960,
     );
 
-    let strategy = make_multi_token_strategy(
-        &env,
-        &[(token_a.clone(), 6_000), (token_b.clone(), 4_000)],
-    );
+    let strategy =
+        make_multi_token_strategy(&env, &[(token_a.clone(), 6_000), (token_b.clone(), 4_000)]);
     governor_client.set_voting_strategy(&strategy);
 
     let proposal_id = propose_exec_gov(
@@ -1092,7 +1089,12 @@ fn setup_dynamic_quorum_governor<'a>(
     env: &'a Env,
     total_supply: i128,
     quorum_numerator: u32,
-) -> (GovernorContractClient<'a>, ConfigurableVotesContractClient<'a>, Address, Address) {
+) -> (
+    GovernorContractClient<'a>,
+    ConfigurableVotesContractClient<'a>,
+    Address,
+    Address,
+) {
     let admin = Address::generate(env);
     let guardian = Address::generate(env);
 
@@ -1124,10 +1126,7 @@ fn setup_dynamic_quorum_governor<'a>(
 }
 
 /// Create a minimal proposal and return its ID.
-fn create_minimal_proposal(
-    env: &Env,
-    governor_client: &GovernorContractClient,
-) -> u64 {
+fn create_minimal_proposal(env: &Env, governor_client: &GovernorContractClient) -> u64 {
     let proposer = Address::generate(env);
     let mock_target = env.register(MockTarget, ());
 
@@ -1171,7 +1170,10 @@ fn test_dynamic_quorum_uses_max_of_static_and_dynamic() {
 
     // Sanity: without dynamic quorum, result is the static quorum.
     let static_q = governor_client.quorum(&proposal_id);
-    assert_eq!(static_q, 100_000, "static quorum should be 10% of 1_000_000");
+    assert_eq!(
+        static_q, 100_000,
+        "static quorum should be 10% of 1_000_000"
+    );
 
     // Register a configurable oracle: price = $1 (1_000_000 in 6-decimal).
     let oracle_id = env.register(ConfigurableOracleContract, ());
@@ -1604,10 +1606,7 @@ fn test_unpause_via_governance_restores_functionality() {
 
     let ts_before_queue = env.ledger().timestamp();
     governor_client.queue(&proposal_id);
-    assert_eq!(
-        governor_client.state(&proposal_id),
-        ProposalState::Queued
-    );
+    assert_eq!(governor_client.state(&proposal_id), ProposalState::Queued);
 
     // Advance past timelock delay and execute — governance works while paused
     env.ledger()
@@ -1652,7 +1651,10 @@ fn test_unpause_via_governance_restores_functionality() {
         &new_calldatas,
     );
 
-    assert_eq!(new_proposal_id, 2, "new proposal should be created after unpause");
+    assert_eq!(
+        new_proposal_id, 2,
+        "new proposal should be created after unpause"
+    );
     assert_eq!(
         governor_client.state(&new_proposal_id),
         ProposalState::Pending,
@@ -1823,7 +1825,10 @@ fn test_cancel_queued_veto_window_uses_correct_conversion_factor() {
     governor_client.cast_vote(&alice, &proposal_id, &VoteSupport::For);
 
     env.ledger().with_mut(|l| l.sequence_number = 31);
-    assert_eq!(governor_client.state(&proposal_id), ProposalState::Succeeded);
+    assert_eq!(
+        governor_client.state(&proposal_id),
+        ProposalState::Succeeded
+    );
 
     // Record the ledger at queue time; advance 11 ledgers (old buggy boundary +1).
     let queue_ledger = env.ledger().sequence();
@@ -1857,9 +1862,7 @@ fn test_cancel_queued_veto_window_uses_correct_conversion_factor() {
 /// Helper: deploy governor backed by ConfigurableVotesContract (no real token
 /// needed) and submit a single proposal.  Returns (governor_id, proposal_id,
 /// start_ledger, end_ledger).
-fn setup_governor_with_proposal(
-    env: &Env,
-) -> (Address, Address, u64, u32, u32) {
+fn setup_governor_with_proposal(env: &Env) -> (Address, Address, u64, u32, u32) {
     env.mock_all_auths_allowing_non_root_auth();
 
     let admin = Address::generate(env);
@@ -1894,7 +1897,13 @@ fn setup_governor_with_proposal(
     );
 
     let mock_target_id = env.register(MockTarget, ());
-    let proposal_id = propose_exec_gov(env, &governor_client, &proposer, &mock_target_id, b"issue-603");
+    let proposal_id = propose_exec_gov(
+        env,
+        &governor_client,
+        &proposer,
+        &mock_target_id,
+        b"issue-603",
+    );
 
     let proposal = governor_client.get_proposal(&proposal_id);
     let start_ledger = proposal.start_ledger;
@@ -1930,7 +1939,8 @@ fn test_cast_vote_after_end_ledger_is_rejected() {
     let voter = Address::generate(&env);
 
     // Advance one ledger past end — voting period has closed.
-    env.ledger().with_mut(|l| l.sequence_number = end_ledger + 1);
+    env.ledger()
+        .with_mut(|l| l.sequence_number = end_ledger + 1);
 
     // Must panic with ProposalNotActive (error code 31).
     governor_client.cast_vote(&voter, &proposal_id, &VoteSupport::For);
@@ -1945,7 +1955,8 @@ fn test_cast_vote_with_reason_after_end_ledger_is_rejected() {
     let governor_client = GovernorContractClient::new(&env, &governor_id);
     let voter = Address::generate(&env);
 
-    env.ledger().with_mut(|l| l.sequence_number = end_ledger + 1);
+    env.ledger()
+        .with_mut(|l| l.sequence_number = end_ledger + 1);
 
     let reason = soroban_sdk::String::from_str(&env, "late vote attempt");
     // Must panic with ProposalNotActive (error code 31).
@@ -1967,11 +1978,13 @@ fn test_post_deadline_vote_cannot_flip_defeated_proposal() {
     votes_client.set_votes(&against_voter, &1_000_000);
 
     // Cast "against" vote during Active window → proposal ends Defeated.
-    env.ledger().with_mut(|l| l.sequence_number = start_ledger + 1);
+    env.ledger()
+        .with_mut(|l| l.sequence_number = start_ledger + 1);
     governor_client.cast_vote(&against_voter, &proposal_id, &VoteSupport::Against);
 
     // Advance past end_ledger.
-    env.ledger().with_mut(|l| l.sequence_number = end_ledger + 1);
+    env.ledger()
+        .with_mut(|l| l.sequence_number = end_ledger + 1);
     assert_eq!(
         governor_client.state(&proposal_id),
         ProposalState::Defeated,
@@ -1980,8 +1993,7 @@ fn test_post_deadline_vote_cannot_flip_defeated_proposal() {
 
     // Attacker tries to flip the outcome by voting after deadline.
     // try_cast_vote returns Err when the contract panics — no std required.
-    let flip_result =
-        governor_client.try_cast_vote(&for_voter, &proposal_id, &VoteSupport::For);
+    let flip_result = governor_client.try_cast_vote(&for_voter, &proposal_id, &VoteSupport::For);
     assert!(
         flip_result.is_err(),
         "post-deadline vote must be rejected by the contract"
@@ -2020,6 +2032,14 @@ fn test_cast_vote_succeeds_at_start_and_end_ledger_boundaries() {
     governor_client.cast_vote(&voter_b, &proposal_id, &VoteSupport::Against);
 
     // Both receipts recorded.
-    assert!(governor_client.get_receipt(&proposal_id, &voter_a).has_voted);
-    assert!(governor_client.get_receipt(&proposal_id, &voter_b).has_voted);
+    assert!(
+        governor_client
+            .get_receipt(&proposal_id, &voter_a)
+            .has_voted
+    );
+    assert!(
+        governor_client
+            .get_receipt(&proposal_id, &voter_b)
+            .has_voted
+    );
 }

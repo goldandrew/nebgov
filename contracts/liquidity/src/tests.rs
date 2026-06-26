@@ -793,7 +793,10 @@ fn test_initial_deposit_returns_exactly_amount_a_lp_tokens() {
 
     // Initial deposit (total_lp_supply == 0): must return amount_a as LP tokens
     let (lp_tokens, deposit_b) = client.add_liquidity(&provider, &0, &1, &50_000, &50_000);
-    assert_eq!(lp_tokens, 50_000, "initial deposit must mint exactly amount_a LP tokens");
+    assert_eq!(
+        lp_tokens, 50_000,
+        "initial deposit must mint exactly amount_a LP tokens"
+    );
     assert_eq!(deposit_b, 50_000);
 
     let pool = client.get_pool(&0, &1);
@@ -817,7 +820,10 @@ fn test_second_deposit_returns_proportional_lp_tokens() {
     // Second deposit: 25_000 A → lp = 25_000 * 100_000 / 100_000 = 25_000
     mint_pair(&env, &token_a, &token_b, &provider2, 25_000, 25_000);
     let (lp2, _) = client.add_liquidity(&provider2, &0, &1, &25_000, &25_000);
-    assert_eq!(lp2, 25_000, "second deposit must mint proportional LP tokens");
+    assert_eq!(
+        lp2, 25_000,
+        "second deposit must mint proportional LP tokens"
+    );
 
     let pool = client.get_pool(&0, &1);
     assert_eq!(pool.reserve_a, 125_000);
