@@ -1725,6 +1725,30 @@ impl GovernorContract {
         events::emit_config_updated(&env, &old_settings, &new_settings);
     }
 
+    /// Update guardian independently of the full config payload.
+    ///
+    /// Authorization is restricted to the governor's own contract address.
+    /// This means the call must originate from an executed on-chain proposal.
+    pub fn set_guardian(env: Env, new_guardian: Address) {
+        env.current_contract_address().require_auth();
+
+        let old_guardian: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .unwrap_or_else(|| env.panic_with_error(GovernorError::GuardianNotSet));
+
+        if old_guardian == new_guardian {
+            return;
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Guardian, &new_guardian);
+
+        events::emit_guardian_changed(&env, &old_guardian, &new_guardian);
+    }
+
     /// Update the maximum calldata size per proposal action.
     ///
     /// Authorization is restricted to the governor's own contract address.
