@@ -69,6 +69,12 @@ pub enum LiquidityError {
     ImbalancedDeposit = 3,
     /// Arithmetic overflow while calculating or updating pool accounting.
     ArithmeticOverflow = 4,
+    /// Pool does not exist for the given outcome pair.
+    PoolNotFound = 5,
+    /// Pool reserve is zero, cannot swap.
+    InsufficientReserves = 6,
+    /// Input and output outcomes must be different.
+    SameOutcome = 7,
 }
 
 #[contract]
@@ -278,7 +284,7 @@ impl LiquidityContract {
             .storage()
             .persistent()
             .get(&pool_key)
-            .expect("pool not found");
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
 
         let position_key = Self::position_key(provider.clone(), outcome_a, outcome_b);
         let mut position: LPPosition = env
@@ -329,8 +335,12 @@ impl LiquidityContract {
     ) -> i128 {
         trader.require_auth();
 
+        if outcome_in == outcome_out {
+            env.panic_with_error(LiquidityError::SameOutcome);
+        }
+
         if amount_in <= 0 {
-            panic!("amount_in must be positive");
+            env.panic_with_error(LiquidityError::InvalidAmount);
         }
 
         // Checks & Reads
@@ -339,7 +349,11 @@ impl LiquidityContract {
             .storage()
             .persistent()
             .get(&pool_key)
-            .expect("pool not found");
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
+
+        if pool.reserve_a == 0 || pool.reserve_b == 0 {
+            env.panic_with_error(LiquidityError::InsufficientReserves);
+        }
 
         let tokens_key = DataKey::PoolTokens(outcome_in, outcome_out);
         let stored_tokens: Option<(Address, Address)> = env.storage().persistent().get(&tokens_key);
@@ -393,7 +407,7 @@ impl LiquidityContract {
             .storage()
             .persistent()
             .get(&pool_key)
-            .expect("pool not found");
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
         pool.fee_bps = fee_bps;
         env.storage().persistent().set(&pool_key, &pool);
     }
@@ -403,7 +417,7 @@ impl LiquidityContract {
         env.storage()
             .persistent()
             .get(&Self::pool_key(outcome_a, outcome_b))
-            .expect("pool not found")
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound))
     }
 
     /// Get immutable metadata recorded when the pool was initialized.

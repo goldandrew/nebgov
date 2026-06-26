@@ -90,6 +90,7 @@ impl MockTarget {
 enum ConfigurableVotesDataKey {
     Votes(Address),
     TotalSupply,
+    Token,
 }
 
 #[contract]
@@ -109,6 +110,12 @@ impl ConfigurableVotesContract {
             .set(&ConfigurableVotesDataKey::TotalSupply, &supply);
     }
 
+    pub fn set_token(env: Env, token: Address) {
+        env.storage()
+            .instance()
+            .set(&ConfigurableVotesDataKey::Token, &token);
+    }
+
     pub fn get_votes(env: Env, account: Address) -> i128 {
         env.storage()
             .instance()
@@ -125,6 +132,13 @@ impl ConfigurableVotesContract {
             .instance()
             .get(&ConfigurableVotesDataKey::TotalSupply)
             .unwrap_or(0)
+    }
+
+    pub fn token(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&ConfigurableVotesDataKey::Token)
+            .expect("token not set")
     }
 }
 
@@ -1098,9 +1112,14 @@ fn setup_dynamic_quorum_governor<'a>(
     let admin = Address::generate(env);
     let guardian = Address::generate(env);
 
+    // Register a real SEP-41 token so the governor can query its decimals (Issue #622).
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+
     let votes_id = env.register(ConfigurableVotesContract, ());
     let votes_client = ConfigurableVotesContractClient::new(env, &votes_id);
     votes_client.set_total_supply(&total_supply);
+    votes_client.set_token(&token_addr);
 
     let timelock_id = env.register(sorogov_timelock::TimelockContract, ());
     let governor_id = env.register(GovernorContract, ());
@@ -1180,8 +1199,9 @@ fn test_dynamic_quorum_uses_max_of_static_and_dynamic() {
     let oracle_client = ConfigurableOracleContractClient::new(&env, &oracle_id);
     oracle_client.set_price(&Some(1_000_000_i128));
 
-    // Case A: usd_quorum (50) < static_quorum (100_000) → static wins.
-    // min_quorum_usd = 50 → usd_quorum = 50 / 1_000_000 = 0 (integer div, < 1)
+    // Case A: usd_quorum (500) < static_quorum (100_000) → static wins.
+    // min_quorum_usd = 50, price = 1_000_000, decimals = 7
+    // usd_quorum = (50 * 10_000_000) / 1_000_000 = 500
     governor_client.update_oracle(&Some(oracle_id.clone()), &50_i128, &true);
     let q_static_wins = governor_client.quorum(&proposal_id);
     assert_eq!(
@@ -1190,12 +1210,12 @@ fn test_dynamic_quorum_uses_max_of_static_and_dynamic() {
     );
 
     // Case B: usd_quorum > static_quorum → dynamic wins.
-    // min_quorum_usd = 200_000_000_000, price = 1_000_000
-    // usd_quorum = 200_000_000_000 / 1_000_000 = 200_000 > 100_000 → dynamic wins.
+    // min_quorum_usd = 200_000_000_000, price = 1_000_000, decimals = 7
+    // usd_quorum = (200_000_000_000 * 10_000_000) / 1_000_000 = 2_000_000_000_000
     governor_client.update_oracle(&Some(oracle_id.clone()), &200_000_000_000_i128, &true);
     let q_dynamic_wins = governor_client.quorum(&proposal_id);
     assert_eq!(
-        q_dynamic_wins, 200_000,
+        q_dynamic_wins, 2_000_000_000_000,
         "dynamic quorum should apply when usd_quorum exceeds static"
     );
 }

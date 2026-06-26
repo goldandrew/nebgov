@@ -9,8 +9,8 @@ mod events;
 use soroban_sdk::xdr::FromXdr;
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
-    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
-    Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
 /// Governor error codes.
@@ -102,6 +102,8 @@ pub trait VotesTrait {
     fn get_past_votes(env: Env, account: Address, ledger: u32) -> i128;
     /// Get the total token supply at a past ledger sequence (snapshot).
     fn get_past_total_supply(env: Env, ledger: u32) -> i128;
+    /// Get the underlying SEP-41 token address that this token-votes contract wraps.
+    fn token(env: Env) -> Address;
 }
 
 /// Cross-contract interface for the Reflector oracle.
@@ -735,6 +737,15 @@ impl GovernorContract {
         env.storage()
             .persistent()
             .set(&DataKey::LastProposalLedger(proposer.clone()), &current);
+        // Extend TTL for the cooldown entry so it does not expire before the
+        // cooldown period elapses (Issue #621).  Add a 1000-ledger buffer so
+        // the storage survives even if the cooldown is set close to the default
+        // Soroban TTL ceiling.
+        env.storage().persistent().extend_ttl(
+            &DataKey::LastProposalLedger(proposer.clone()),
+            cooldown.saturating_add(1000),
+            cooldown.saturating_add(1000),
+        );
 
         // Prune the previous period's key for this proposer to prevent
         // unbounded storage growth (Issue #716).  We only need the current
@@ -752,6 +763,13 @@ impl GovernorContract {
         env.storage().persistent().set(
             &DataKey::ProposalsInPeriod(proposer.clone(), current_period),
             &(proposals_in_period + 1),
+        );
+        // Extend TTL for the period-count entry so it does not expire before
+        // the period ends (Issue #621).  Add a 1000-ledger buffer for safety.
+        env.storage().persistent().extend_ttl(
+            &DataKey::ProposalsInPeriod(proposer.clone(), current_period),
+            period_duration.saturating_add(1000),
+            period_duration.saturating_add(1000),
         );
 
         // Emit ProposalCreated event with all proposal fields
@@ -1516,7 +1534,17 @@ impl GovernorContract {
                 let price_opt = oracle.try_lastprice(&votes_token_addr);
                 if let Ok(Ok(Some(price))) = price_opt {
                     if price > 0 {
-                        let usd_quorum = min_quorum_usd / price;
+                        // Query the underlying token's decimal places from the
+                        // token-votes contract so the dynamic quorum formula
+                        // correctly converts the USD floor to token units (Issue #622).
+                        let underlying_token = VotesClient::new(&env, &votes_token_addr).token();
+                        let token_decimals: u32 =
+                            token::TokenClient::new(&env, &underlying_token).decimals();
+                        let scaling_factor = 10i128.pow(token_decimals);
+                        let usd_quorum =
+                            min_quorum_usd.checked_mul(scaling_factor).unwrap_or_else(|| {
+                                env.panic_with_error(GovernorError::ArithmeticOverflow)
+                            }) / price;
                         return static_quorum.max(usd_quorum);
                     }
                 }
@@ -2454,8 +2482,17 @@ mod test {
     #[contract]
     pub struct MockVotesContract;
 
+    #[contracttype]
+    enum MockDataKey {
+        Token,
+    }
+
     #[contractimpl]
     impl MockVotesContract {
+        pub fn set_token(env: Env, token: Address) {
+            env.storage().instance().set(&MockDataKey::Token, &token);
+        }
+
         pub fn get_votes(_env: Env, _account: Address) -> i128 {
             // Return a high vote count that exceeds any reasonable threshold
             1_000_000
@@ -2469,6 +2506,13 @@ mod test {
         pub fn get_past_total_supply(_env: Env, _ledger: u32) -> i128 {
             // Return a fixed total supply for quorum calculations in tests
             10_000_000
+        }
+
+        pub fn token(env: Env) -> Address {
+            env.storage()
+                .instance()
+                .get(&MockDataKey::Token)
+                .unwrap_or_else(|| Address::generate(&env))
         }
     }
 
@@ -3445,8 +3489,14 @@ mod test {
         let admin = Address::generate(&env);
         let guardian = Address::generate(&env);
         let votes_token_id = env.register(MockVotesContract, ());
+        let mock_votes_client = MockVotesContractClient::new(&env, &votes_token_id);
         let timelock = env.register(MockTimelockContract, ());
         let proposer = Address::generate(&env);
+
+        // Deploy a real SEP-41 token so the governor can query its decimals.
+        let sac = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_addr = sac.address();
+        mock_votes_client.set_token(&token_addr);
 
         // 10% static quorum: supply=10_000_000, so static = 1_000_000.
         client.initialize(
@@ -3472,10 +3522,12 @@ mod test {
         // Register the mock oracle ($5.00 per token, 6-decimal format).
         let oracle_id = env.register(MockOracleContract, ());
 
-        // Enable dynamic quorum: min_quorum_usd = 20_000_000 ($20 in 6-decimal),
-        // price = 5_000_000 ($5), so usd_quorum = 20_000_000 / 5_000_000 = 4.
-        // usd_quorum (4) < static_quorum (1_000_000), so static wins.
-        client.update_oracle(&Some(oracle_id.clone()), &20_000_000_i128, &true);
+        // Enable dynamic quorum: min_quorum_usd = 50 ($0.00005 in 6-decimal),
+        // price = 5_000_000 ($5). The correct formula (Issue #622):
+        //   usd_quorum = (min_quorum_usd * 10^decimals) / price
+        //   = (50 * 10^7) / 5_000_000 = 100
+        // usd_quorum (100) < static_quorum (1_000_000), so static wins.
+        client.update_oracle(&Some(oracle_id.clone()), &50_i128, &true);
         let dynamic_q = client.quorum(&proposal_id);
         assert_eq!(
             dynamic_q, 1_000_000,
@@ -3483,12 +3535,12 @@ mod test {
         );
 
         // Now set a very high USD floor that translates to more tokens than static quorum.
-        // usd_quorum = min_quorum_usd / price = 10_000_000_000_000 / 5_000_000 = 2_000_000.
-        // 2_000_000 > static_quorum (1_000_000), so dynamic wins.
+        // usd_quorum = (10_000_000_000_000 * 10^7) / 5_000_000 = 20_000_000_000_000.
+        // 20_000_000_000_000 > static_quorum (1_000_000), so dynamic wins.
         client.update_oracle(&Some(oracle_id.clone()), &10_000_000_000_000_i128, &true);
         let high_dynamic_q = client.quorum(&proposal_id);
         assert_eq!(
-            high_dynamic_q, 2_000_000,
+            high_dynamic_q, 20_000_000_000_000,
             "dynamic quorum should use USD floor when larger than static"
         );
 
