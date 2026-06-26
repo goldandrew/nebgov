@@ -902,6 +902,72 @@ mod tests {
     }
 
     #[test]
+    fn test_spending_cap_enforcement_succeeds_within_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (treasury_id, token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+        let alice = Address::generate(&env);
+        let sac_client = token::StellarAssetClient::new(&env, &token_addr);
+        sac_client.mint(&treasury_id, &1000i128);
+
+        client.set_spending_cap(&governor, &token_addr, &500i128, &100u32);
+
+        let mut recipients = Vec::new(&env);
+        recipients.push_back(BatchRecipient { recipient: alice, amount: 500 });
+        client.batch_transfer(&governor, &token_addr, &recipients); // should succeed
+    }
+
+    #[test]
+    #[should_panic(expected = "spending cap exceeded")]
+    fn test_spending_cap_enforcement_reverts_when_exceeded() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (treasury_id, token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+        let alice = Address::generate(&env);
+        let sac_client = token::StellarAssetClient::new(&env, &token_addr);
+        sac_client.mint(&treasury_id, &1000i128);
+
+        client.set_spending_cap(&governor, &token_addr, &500i128, &100u32);
+
+        // First spend 400
+        let mut recipients1 = Vec::new(&env);
+        recipients1.push_back(BatchRecipient { recipient: alice.clone(), amount: 400 });
+        client.batch_transfer(&governor, &token_addr, &recipients1);
+
+        // Then spend 101, which exceeds the remaining 100
+        let mut recipients2 = Vec::new(&env);
+        recipients2.push_back(BatchRecipient { recipient: alice, amount: 101 });
+        client.batch_transfer(&governor, &token_addr, &recipients2); // should panic
+    }
+
+    #[test]
+    fn test_spending_cap_enforcement_resets_after_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (treasury_id, token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+        let alice = Address::generate(&env);
+        let sac_client = token::StellarAssetClient::new(&env, &token_addr);
+        sac_client.mint(&treasury_id, &1000i128);
+
+        let period_ledgers = 100u32;
+        client.set_spending_cap(&governor, &token_addr, &500i128, &period_ledgers);
+
+        // First spend max cap
+        let mut recipients = Vec::new(&env);
+        recipients.push_back(BatchRecipient { recipient: alice.clone(), amount: 500 });
+        client.batch_transfer(&governor, &token_addr, &recipients);
+
+        // Advance ledger beyond the period
+        env.ledger().with_mut(|l| l.sequence_number += period_ledgers + 1);
+
+        // Second spend max cap should succeed because period reset
+        client.batch_transfer(&governor, &token_addr, &recipients); // should succeed
+    }
+
+    #[test]
     fn test_batch_transfer_deterministic_hash() {
         let env = Env::default();
         env.mock_all_auths();
