@@ -7,6 +7,7 @@ use soroban_sdk::{
 };
 
 const DEFAULT_PENDING_EXPIRY_LEDGERS: u32 = 17_280;
+const TX_STORAGE_TTL_LEDGERS: u32 = 518_400;
 
 /// Treasury error codes.
 #[contracterror]
@@ -236,6 +237,11 @@ impl TreasuryContract {
         };
 
         env.storage().persistent().set(&DataKey::Tx(id), &tx);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Tx(id),
+            TX_STORAGE_TTL_LEDGERS,
+            TX_STORAGE_TTL_LEDGERS,
+        );
         env.storage().instance().set(&DataKey::TxCount, &id);
         env.events().publish((symbol_short!("submit"),), id);
 
@@ -359,6 +365,11 @@ impl TreasuryContract {
             // State-first: commit executed before making any external call.
             tx.executed = true;
             env.storage().persistent().set(&DataKey::Tx(tx_id), &tx);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Tx(tx_id),
+                TX_STORAGE_TTL_LEDGERS,
+                TX_STORAGE_TTL_LEDGERS,
+            );
 
             // Lock execution path to reject reentrant approve/cancel/submit.
             env.storage().instance().set(&DataKey::IsExecuting, &true);
@@ -368,6 +379,11 @@ impl TreasuryContract {
             env.events().publish((symbol_short!("execute"),), tx_id);
         } else {
             env.storage().persistent().set(&DataKey::Tx(tx_id), &tx);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Tx(tx_id),
+                TX_STORAGE_TTL_LEDGERS,
+                TX_STORAGE_TTL_LEDGERS,
+            );
         }
 
         env.events()
@@ -412,6 +428,11 @@ impl TreasuryContract {
 
         tx.cancelled = true;
         env.storage().persistent().set(&DataKey::Tx(tx_id), &tx);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Tx(tx_id),
+            TX_STORAGE_TTL_LEDGERS,
+            TX_STORAGE_TTL_LEDGERS,
+        );
         env.events().publish((symbol_short!("cancel"),), tx_id);
     }
 

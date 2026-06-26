@@ -305,6 +305,15 @@ impl LiquidityContract {
         let amount_a = (lp_tokens * pool.reserve_a) / pool.total_lp_supply;
         let amount_b = (lp_tokens * pool.reserve_b) / pool.total_lp_supply;
 
+        // Ensure post-removal reserves don't drop below MIN_LIQUIDITY unless fully drained
+        let remaining_a = pool.reserve_a - amount_a;
+        let remaining_b = pool.reserve_b - amount_b;
+        if (remaining_a > 0 && remaining_a < MIN_LIQUIDITY)
+            || (remaining_b > 0 && remaining_b < MIN_LIQUIDITY)
+        {
+            panic!("below minimum liquidity");
+        }
+
         // Effects
         pool.reserve_a -= amount_a;
         pool.reserve_b -= amount_b;
