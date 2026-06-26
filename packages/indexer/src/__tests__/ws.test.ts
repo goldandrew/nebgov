@@ -137,4 +137,17 @@ describe("WebSocket broadcast server", () => {
     expect(JSON.parse(raw).type).toBe("proposal_created");
     ws.close();
   });
+
+  it("resets missedPings counter when pong is received", async () => {
+    const ws = await openClient(serverUrl);
+    // Respond to server pings with pongs to stay alive
+    ws.on("ping", () => ws.pong());
+
+    // Client remains connected and can still receive events
+    const messagePromise = nextMessage(ws);
+    broadcast({ type: "proposal_created", data: { id: "42" } });
+    const raw = await messagePromise;
+    expect(JSON.parse(raw).type).toBe("proposal_created");
+    ws.close();
+  });
 });

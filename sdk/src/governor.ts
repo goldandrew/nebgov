@@ -241,6 +241,19 @@ export class GovernorClient {
         );
       }
 
+      // Validate descriptionHash matches SHA-256(description) to prevent
+      // unverifiable proposals from accidental hash/description mismatch.
+      // Skip for legacy calls where the hash is a zeroed placeholder.
+      if (!legacyCall) {
+        const computed = await hashDescription(description);
+        if (computed !== descriptionHash.toLowerCase().replace(/^0x/, "")) {
+          throw new GovernorError(
+            GovernorErrorCode.InvalidArguments,
+            `description_hash does not match SHA-256 of description (expected ${computed})`,
+          );
+        }
+      }
+
       // Convert hex string to BytesN<32>
       const hashBytes = hexToBytes32(descriptionHash);
 

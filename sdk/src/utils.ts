@@ -112,13 +112,15 @@ export async function withRetry<T>(
   opts?: {
     maxAttempts?: number;
     baseDelayMs?: number;
+    maxDelayMs?: number;
     retryOn?: (e: unknown) => boolean;
     onRetry?: (attempt: number, error: unknown) => void;
   }
 ): Promise<T> {
   const maxAttempts = opts?.maxAttempts ?? 3;
   const baseDelayMs = opts?.baseDelayMs ?? 1000;
-  
+  const maxDelayMs = opts?.maxDelayMs ?? 30_000;
+
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -131,7 +133,9 @@ export async function withRetry<T>(
       if (attempt === maxAttempts) {
         break;
       }
-      const delay = baseDelayMs * Math.pow(2, attempt - 1);
+      const exponential = Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);
+      const jitter = Math.random() * exponential * 0.3;
+      const delay = exponential + jitter;
       if (opts?.onRetry) {
         opts.onRetry(attempt, e);
       }

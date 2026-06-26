@@ -25,7 +25,11 @@ interface SubscriptionFilter {
 interface SubscribedClient {
   socket: WebSocket;
   filter: SubscriptionFilter;
+  missedPings: number;
 }
+
+const HEARTBEAT_INTERVAL_MS = 25_000;
+const MAX_MISSED_PINGS = 3;
 
 const clients = new Set<SubscribedClient>();
 
@@ -56,7 +60,7 @@ export function createWsServer(httpServer: HttpServer): WebSocketServer {
   const wss = new WebSocketServer({ server: httpServer, path: "/events" });
 
   wss.on("connection", (socket: WebSocket, _req: IncomingMessage) => {
-    const entry: SubscribedClient = { socket, filter: {} };
+    const entry: SubscribedClient = { socket, filter: {}, missedPings: 0 };
     clients.add(entry);
 
     socket.on("message", (raw) => {
@@ -73,6 +77,10 @@ export function createWsServer(httpServer: HttpServer): WebSocketServer {
       }
     });
 
+    socket.on("pong", () => {
+      entry.missedPings = 0;
+    });
+
     socket.on("close", () => {
       clients.delete(entry);
     });
@@ -80,6 +88,24 @@ export function createWsServer(httpServer: HttpServer): WebSocketServer {
     socket.on("error", () => {
       clients.delete(entry);
     });
+  });
+
+  const heartbeat = setInterval(() => {
+    for (const client of clients) {
+      if (client.missedPings >= MAX_MISSED_PINGS) {
+        client.socket.terminate();
+        clients.delete(client);
+        continue;
+      }
+      if (client.socket.readyState === WebSocket.OPEN) {
+        client.missedPings += 1;
+        client.socket.ping();
+      }
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  wss.on("close", () => {
+    clearInterval(heartbeat);
   });
 
   return wss;
