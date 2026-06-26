@@ -14,6 +14,7 @@ import { ProposalCardSkeleton } from "../components/ui/ProposalCardSkeleton";
 import { useDebounce } from "../hooks/useDebounce";
 import { getErrorMessage, reportFrontendError } from "../lib/frontend-error";
 import { ProposalStateBadge } from "../components/ProposalStateBadge";
+import { CountdownTimer } from "../components/CountdownTimer";
 
 
 interface ProposalSummary {
@@ -22,6 +23,7 @@ interface ProposalSummary {
   state: ProposalState;
   votesFor: bigint;
   votesAgainst: bigint;
+  startLedger: number;
   endLedger: number;
 }
 
@@ -211,6 +213,7 @@ function ProposalsPageInner() {
           state: r.state!,
           votesFor: r.votes!.votesFor,
           votesAgainst: r.votes!.votesAgainst,
+          startLedger: 0,
           endLedger: 0,
         }));
 
@@ -421,6 +424,15 @@ function ProposalsPageInner() {
                         {(Number(p.votesAgainst) / 1e7).toLocaleString()}
                       </span>
                     </div>
+                    {p.state === ProposalState.Active && p.endLedger > 0 && (
+                      <div className="mt-2">
+                        <CountdownTimer
+                          state={p.state}
+                          startLedger={p.startLedger}
+                          endLedger={p.endLedger}
+                        />
+                      </div>
+                    )}
                   </div>
                   <span
                     className={`ml-4 shrink-0 px-3 py-1 rounded-full text-xs font-medium ${STATE_COLORS[p.state]}`}
