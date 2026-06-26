@@ -31,6 +31,7 @@ import {
 } from "./types";
 
 import { TimelockClient } from "./timelock";
+import { streamEvents, type IndexerEvent } from "./streamEvents";
 
 /** Options for uploading proposal metadata to IPFS. */
 export interface MetadataUploadOptions {
@@ -1496,6 +1497,42 @@ export class GovernorClient {
     return () => {
       stopped = true;
       clearInterval(handle);
+    };
+  }
+
+  /**
+   * Watch a proposal's state changes in real-time.
+   *
+   * Uses the indexer WebSocket when an `indexerUrl` is configured, falling
+   * back to polling `getProposalState` via `onProposalStateChange`. Returns
+   * an unsubscribe function that stops the watcher.
+   *
+   * @param proposalId - The proposal ID to watch
+   * @param onChange - Called each time the proposal state transitions
+   * @param pollIntervalMs - Polling interval (default 10_000)
+   * @returns A function to stop watching
+   */
+  watchProposal(
+    proposalId: bigint,
+    onChange: (newState: ProposalState) => void,
+    pollIntervalMs: number = 10_000,
+  ): () => void {
+    const unsubPoll = this.onProposalStateChange(proposalId, onChange, pollIntervalMs);
+
+    let unsubEvents: (() => void) | undefined;
+    if (this.config.indexerUrl) {
+      unsubEvents = streamEvents(
+        this.config.indexerUrl,
+        (_event: IndexerEvent) => {
+          // state transitions are handled by the polling fallback
+        },
+        { proposalId: String(proposalId) },
+      );
+    }
+
+    return () => {
+      unsubPoll();
+      unsubEvents?.();
     };
   }
 

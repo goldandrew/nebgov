@@ -322,6 +322,7 @@ impl TokenVotesContract {
         let current_ledger = env.ledger().sequence();
         assert!(ledger <= current_ledger, "ledger must not exceed current ledger");
 
+        let key = DataKey::Checkpoints(account);
         let checkpoints: soroban_sdk::Vec<Checkpoint> = env
             .storage()
             .persistent()

@@ -49,6 +49,8 @@ pub enum GovernorError {
     TooManyCalldataEntries = 30,
     /// Vote was cast outside the proposal's Active voting window.
     ProposalNotActive = 31,
+    /// The contract has already been initialized.
+    AlreadyInitialized = 32,
 }
 
 /// Cross-contract interface for the Timelock contract.
@@ -476,6 +478,9 @@ impl GovernorContract {
         proposal_grace_period: u32,
     ) {
         admin.require_auth();
+        if env.storage().instance().has(&DataKey::Admin) {
+            env.panic_with_error(GovernorError::AlreadyInitialized);
+        }
         if voting_period == 0 {
             env.panic_with_error(GovernorError::VotePeriodTooShort);
         }

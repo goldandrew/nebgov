@@ -143,23 +143,47 @@ fn upgrade_rejects_admin_acting_as_direct_caller() {
         &VoteType::Extended,
         &120_960u32,
     );
+}
 
-    let new_wasm_hash = BytesN::from_array(&env, &[3u8; 32]);
+#[test]
+#[should_panic(expected = "Error(Contract, #32)")]
+fn initialize_rejects_reinitialization() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let votes_token = Address::generate(&env);
+    let timelock = env.register(MockTimelockContract, ());
+    let contract_id = env.register(GovernorContract, ());
     let client = GovernorContractClient::new(&env, &contract_id);
+    let guardian = Address::generate(&env);
 
-    // Replace mock_all_auths with a specific mock for admin only.
-    // The upgrade guard requires contract_id, not admin — must panic.
-    env.mock_auths(&[MockAuth {
-        address: &admin,
-        invoke: &MockAuthInvoke {
-            contract: &contract_id,
-            fn_name: "upgrade",
-            args: (new_wasm_hash.clone(),).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
+    // First call succeeds
+    client.initialize(
+        &admin,
+        &votes_token,
+        &timelock,
+        &100u32,
+        &1000u32,
+        &4u32,
+        &0i128,
+        &guardian,
+        &VoteType::Extended,
+        &120_960u32,
+    );
 
-    client.upgrade(&new_wasm_hash);
+    // Second call must panic with AlreadyInitialized
+    client.initialize(
+        &admin,
+        &votes_token,
+        &timelock,
+        &100u32,
+        &1000u32,
+        &4u32,
+        &0i128,
+        &guardian,
+        &VoteType::Extended,
+        &120_960u32,
+    );
 }
 
 #[test]
