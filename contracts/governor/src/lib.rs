@@ -41,6 +41,7 @@ pub enum GovernorError {
     VotesTokenNotSet = 25,
     PauserNotSet = 26,
     ArithmeticOverflow = 27,
+    VotesTokenInvalidAddress = 28,
 }
 
 /// Cross-contract interface for the Timelock contract.
@@ -337,11 +338,6 @@ impl GovernorContract {
         let current = env.ledger().sequence();
         
         // Get configuration from storage
-        let voting_period: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::VotingPeriod)
-            .unwrap_or(1000);
         let grace_period: u32 = env
             .storage()
             .instance()
@@ -356,10 +352,12 @@ impl GovernorContract {
         
         let timelock_delay_ledgers: u32 = if let Some(addr) = timelock_addr {
             let timelock = TimelockClient::new(env, &addr);
-            let delay_seconds = timelock.min_delay();
-            let execution_window_seconds = timelock.execution_window();
-            // Convert seconds to ledgers (assuming ~5 second blocks)
-            ((delay_seconds + execution_window_seconds) / 5) as u32
+            match (timelock.try_min_delay(), timelock.try_execution_window()) {
+                (Ok(Ok(delay_seconds)), Ok(Ok(execution_window_seconds))) => {
+                    ((delay_seconds + execution_window_seconds) / 5) as u32
+                }
+                _ => 1000,
+            }
         } else {
             1000 // conservative default
         };
@@ -381,7 +379,7 @@ impl GovernorContract {
         // Extend the TTL for the proposal storage entry
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Proposal(proposal_id), ttl_ledgers);
+            .extend_ttl(&DataKey::Proposal(proposal_id), ttl_ledgers, ttl_ledgers);
     }
 
     fn decode_calldata_args(env: &Env, data: &Bytes) -> Vec<Val> {
@@ -436,6 +434,12 @@ impl GovernorContract {
         proposal_grace_period: u32,
     ) {
         admin.require_auth();
+
+        // Validation guard for votes_token: ensure it is not the contract itself or an obviously invalid value (prevent self-reference loop, see #696).
+        if votes_token == env.current_contract_address() {
+            env.panic_with_error(GovernorError::VotesTokenInvalidAddress);
+        }
+
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
@@ -1627,6 +1631,11 @@ impl GovernorContract {
             .unwrap_or(0)
     }
 
+    /// Get a proposal by ID.
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Proposal {
+        Self::must_get_proposal(&env, proposal_id)
+    }
+
     /// Get the ledger sequence of the last proposal by an address.
     pub fn last_proposal_ledger(env: Env, address: Address) -> u32 {
         env.storage()
@@ -1990,6 +1999,11 @@ impl GovernorContract {
         env.current_contract_address().require_auth();
         // TODO: implement storage migration logic when a breaking storage
         // change is introduced in a future upgrade.
+
+        // Post-condition validation guard to ensure VotesToken is not cleared from storage (see #696).
+        if !env.storage().instance().has(&DataKey::VotesToken) {
+            env.panic_with_error(GovernorError::VotesTokenNotSet);
+        }
     }
 
     // ============================================================================
@@ -3184,12 +3198,19 @@ mod test {
             &timelock,
             &voting_delay,
             &long_voting_period,
-            &50,
+            &5,
             &1000,
             &guardian,
             &VoteType::Extended,
             &120_960, // grace period
         );
+
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(300_000, 300_000);
+        });
+        env.as_contract(&votes_token_id, || {
+            env.storage().instance().extend_ttl(300_000, 300_000);
+        });
 
         // Create proposal — should extend TTL
         let proposal_id = propose_dummy(&env, &client, &proposer);

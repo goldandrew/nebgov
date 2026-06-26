@@ -23,7 +23,7 @@ use crate::{
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events, Ledger as _},
-    token, Address, Bytes, Env, IntoVal, Symbol, TryIntoVal,
+    token, Address, Bytes, Env, IntoVal, String, Symbol, TryIntoVal,
 };
 
 // ---------------------------------------------------------------------------
@@ -1660,4 +1660,216 @@ fn test_set_pauser_requires_self_auth() {
     }]);
 
     governor_client.set_pauser(&new_pauser);
+}
+
+// ============================================================================
+// VotesToken Panic & Validation Guard Tests (Issue #696)
+// ============================================================================
+
+
+fn setup_governor_for_missing_token_tests(env: &Env) -> (Address, Address, GovernorContractClient) {
+    env.mock_all_auths();
+
+    let admin = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+
+    let votes_id = env.register(TokenVotesContract, ());
+    let votes_client = TokenVotesContractClient::new(env, &votes_id);
+    votes_client.initialize(&admin, &token_addr);
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+
+    let timelock_client = TimelockContractClient::new(env, &timelock_id);
+    let governor_client = GovernorContractClient::new(env, &governor_id);
+
+    timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
+
+    let pauser = Address::generate(env);
+    governor_client.initialize(
+        &admin,
+        &votes_id,
+        &timelock_id,
+        &10_u32,
+        &20_u32,
+        &5_u32,
+        &0_i128,
+        &pauser,
+        &VoteType::Extended,
+        &120_960u32,
+    );
+
+    (governor_id, votes_id, governor_client)
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_initialize_fails_if_votes_token_is_self() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let governor_id = env.register(GovernorContract, ());
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    let admin = Address::generate(&env);
+    let timelock = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    governor_client.initialize(
+        &admin,
+        &governor_id, // Pass self as votes_token
+        &timelock,
+        &100,
+        &1000,
+        &50,
+        &1000,
+        &guardian,
+        &VoteType::Extended,
+        &120_960,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #25)")]
+fn test_votes_token_missing_storage_reverts_state() {
+    let env = Env::default();
+    let (governor_id, votes_id, governor_client) = setup_governor_for_missing_token_tests(&env);
+
+    let proposer = Address::generate(&env);
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    let sac = soroban_sdk::token::StellarAssetClient::new(&env, &votes_client.token());
+    sac.mint(&proposer, &1_000_000_i128);
+    votes_client.delegate(&proposer, &proposer);
+
+    let target = Address::generate(&env);
+    let fn_name = Symbol::new(&env, "exec");
+    let calldata = Bytes::new(&env);
+    let description = String::from_str(&env, "Test");
+    let description_hash = env.crypto().sha256(&Bytes::from_slice(&env, b"Test")).into();
+
+    let proposal_id = governor_client.propose(
+        &proposer,
+        &description,
+        &description_hash,
+        &String::from_str(&env, "meta"),
+        &soroban_sdk::vec![&env, target],
+        &soroban_sdk::vec![&env, fn_name],
+        &soroban_sdk::vec![&env, calldata],
+    );
+
+    // Advance sequence number past end of voting period to force quorum check in state()
+    env.ledger().with_mut(|li| li.sequence_number += 35);
+
+    // Delete VotesToken from storage
+    env.as_contract(&governor_id, || {
+        env.storage().instance().remove(&crate::DataKey::VotesToken);
+    });
+
+    // This should panic because VotesToken is not set
+    governor_client.state(&proposal_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #25)")]
+fn test_votes_token_missing_storage_reverts_queue() {
+    let env = Env::default();
+    let (governor_id, votes_id, governor_client) = setup_governor_for_missing_token_tests(&env);
+
+    let proposer = Address::generate(&env);
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    let sac = soroban_sdk::token::StellarAssetClient::new(&env, &votes_client.token());
+    sac.mint(&proposer, &1_000_000_i128);
+    votes_client.delegate(&proposer, &proposer);
+
+    let target = Address::generate(&env);
+    let fn_name = Symbol::new(&env, "exec");
+    let calldata = Bytes::new(&env);
+    let description = String::from_str(&env, "Test");
+    let description_hash = env.crypto().sha256(&Bytes::from_slice(&env, b"Test")).into();
+
+    let proposal_id = governor_client.propose(
+        &proposer,
+        &description,
+        &description_hash,
+        &String::from_str(&env, "meta"),
+        &soroban_sdk::vec![&env, target],
+        &soroban_sdk::vec![&env, fn_name],
+        &soroban_sdk::vec![&env, calldata],
+    );
+
+    // Advance sequence number past end of voting period to force quorum check in state() during queue()
+    env.ledger().with_mut(|li| li.sequence_number += 35);
+
+    // Delete VotesToken from storage
+    env.as_contract(&governor_id, || {
+        env.storage().instance().remove(&crate::DataKey::VotesToken);
+    });
+
+    // This should panic because VotesToken is not set
+    governor_client.queue(&proposal_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #25)")]
+fn test_votes_token_missing_storage_reverts_cast_vote() {
+    let env = Env::default();
+    let (governor_id, votes_id, governor_client) = setup_governor_for_missing_token_tests(&env);
+
+    let proposer = Address::generate(&env);
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    let sac = soroban_sdk::token::StellarAssetClient::new(&env, &votes_client.token());
+    sac.mint(&proposer, &1_000_000_i128);
+    votes_client.delegate(&proposer, &proposer);
+
+    let target = Address::generate(&env);
+    let fn_name = Symbol::new(&env, "exec");
+    let calldata = Bytes::new(&env);
+    let description = String::from_str(&env, "Test");
+    let description_hash = env.crypto().sha256(&Bytes::from_slice(&env, b"Test")).into();
+
+    let proposal_id = governor_client.propose(
+        &proposer,
+        &description,
+        &description_hash,
+        &String::from_str(&env, "meta"),
+        &soroban_sdk::vec![&env, target],
+        &soroban_sdk::vec![&env, fn_name],
+        &soroban_sdk::vec![&env, calldata],
+    );
+
+    // Advance sequence number to make proposal active
+    env.ledger().with_mut(|li| li.sequence_number += 11);
+
+    // Delete VotesToken from storage
+    env.as_contract(&governor_id, || {
+        env.storage().instance().remove(&crate::DataKey::VotesToken);
+    });
+
+    let voter = Address::generate(&env);
+    governor_client.cast_vote(&voter, &proposal_id, &VoteSupport::For);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #25)")]
+fn test_migrate_fails_if_votes_token_missing() {
+    let env = Env::default();
+    let (governor_id, _, governor_client) = setup_governor_for_missing_token_tests(&env);
+
+    // Delete VotesToken from storage
+    env.as_contract(&governor_id, || {
+        env.storage().instance().remove(&crate::DataKey::VotesToken);
+    });
+
+    // mock_all_auths is already set in setup, which will mock the contract's own self-auth.
+    governor_client.migrate(&crate::MigrateData { new_version: 1 });
+}
+
+#[test]
+fn test_migrate_succeeds_if_votes_token_present() {
+    let env = Env::default();
+    let (governor_id, _, governor_client) = setup_governor_for_missing_token_tests(&env);
+
+    // mock_all_auths is already set in setup, which will mock the contract's own self-auth.
+    governor_client.migrate(&crate::MigrateData { new_version: 1 });
 }

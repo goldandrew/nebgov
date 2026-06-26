@@ -402,7 +402,12 @@ async function handleConfigUpdated(
   await pool.query(
     `INSERT INTO config_updates (ledger, new_settings)
      VALUES ($1, $2)`,
-    [event.ledger, JSON.stringify(newSettings)],
+    [
+      event.ledger,
+      JSON.stringify(newSettings, (key, value) =>
+        typeof value === "bigint" ? value.toString() : value
+      ),
+    ],
   );
 }
 
