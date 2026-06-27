@@ -2,7 +2,7 @@ use super::{LiquidityContract, LiquidityContractClient, LiquidityError};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events, Ledger as _},
     Address, Bytes, Env, IntoVal, String, Symbol, Val, Vec,
 };
 use sorogov_governor::{GovernorContract, GovernorContractClient, VoteSupport, VoteType};
@@ -960,4 +960,128 @@ fn test_constant_product_invariant_small_swap() {
     let k_after = pool_after.reserve_a * pool_after.reserve_b;
 
     assert!(k_after >= k_before, "k decreased on small swap: {} < {}", k_after, k_before);
+}
+
+// ---------------------------------------------------------------------------
+// Event emission tests (issue #602)
+// ---------------------------------------------------------------------------
+
+/// Helper: extract the first topic Symbol string from a recorded event.
+fn first_topic_str(env: &Env, event_index: usize) -> String {
+    let all = env.events().all();
+    let (topics, _): (soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+        all.get(event_index as u32).unwrap();
+    let raw: soroban_sdk::Val = topics.get(0).unwrap();
+    let sym: Symbol = raw.try_into_val(env).unwrap();
+    // Convert Symbol to a comparable String
+    String::from_str(env, sym.to_string().as_str())
+}
+
+#[test]
+fn test_add_liquidity_emits_event() {
+    let (env, contract_id, governor, provider, _trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+
+    let events_before = env.events().all().len();
+    client.add_liquidity(&provider, &0, &1, &500_000, &500_000);
+    let events_after = env.events().all().len();
+
+    // At least one event was emitted
+    assert!(
+        events_after > events_before,
+        "add_liquidity must emit at least one event"
+    );
+
+    // The last event must be LiquidityAdded
+    let all = env.events().all();
+    let (topics, _): (soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+        all.last().unwrap();
+    let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(
+        topic0,
+        Symbol::new(&env, "LiquidityAdded"),
+        "first topic must be LiquidityAdded"
+    );
+}
+
+#[test]
+fn test_remove_liquidity_emits_event() {
+    let (env, contract_id, governor, provider, _trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &500_000, &500_000);
+
+    let events_before = env.events().all().len();
+    client.remove_liquidity(&provider, &0, &1, &100_000);
+    let events_after = env.events().all().len();
+
+    assert!(
+        events_after > events_before,
+        "remove_liquidity must emit at least one event"
+    );
+
+    let all = env.events().all();
+    let (topics, _): (soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+        all.last().unwrap();
+    let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(
+        topic0,
+        Symbol::new(&env, "LiquidityRemoved"),
+        "first topic must be LiquidityRemoved"
+    );
+}
+
+#[test]
+fn test_swap_emits_event() {
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &1_000_000, &1_000_000);
+    mint_pair(&env, &token_a, &token_b, &trader, 100_000, 0);
+
+    let events_before = env.events().all().len();
+    client.swap(&trader, &0, &1, &100_000, &0);
+    let events_after = env.events().all().len();
+
+    assert!(
+        events_after > events_before,
+        "swap must emit at least one event"
+    );
+
+    let all = env.events().all();
+    let (topics, _): (soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+        all.last().unwrap();
+    let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(
+        topic0,
+        Symbol::new(&env, "Swap"),
+        "first topic must be Swap"
+    );
+}
+
+#[test]
+fn test_update_pool_fee_emits_event() {
+    let (env, contract_id, governor, _provider, _trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+
+    let events_before = env.events().all().len();
+    client.update_pool_fee(&governor, &0, &1, &50);
+    let events_after = env.events().all().len();
+
+    assert!(
+        events_after > events_before,
+        "update_pool_fee must emit at least one event"
+    );
+
+    let all = env.events().all();
+    let (topics, _): (soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+        all.last().unwrap();
+    let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(
+        topic0,
+        Symbol::new(&env, "PoolFeeUpdated"),
+        "first topic must be PoolFeeUpdated"
+    );
 }

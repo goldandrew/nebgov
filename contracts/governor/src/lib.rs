@@ -51,6 +51,26 @@ pub enum GovernorError {
     ProposalNotActive = 31,
     /// The contract has already been initialized.
     AlreadyInitialized = 32,
+    /// voting_delay exceeds the protocol maximum (1_209_600 ledgers).
+    InvalidVotingDelay = 33,
+    /// voting_period must be greater than zero.
+    InvalidVotingPeriod = 34,
+    /// quorum_numerator must be at most 100.
+    InvalidQuorumNumerator = 35,
+    /// proposal_threshold must be non-negative.
+    InvalidProposalThreshold = 36,
+    /// max_calldata_size must be greater than zero.
+    InvalidMaxCalldataSize = 37,
+    /// max_proposals_per_period must be greater than zero.
+    InvalidMaxProposalsPerPeriod = 38,
+    /// proposal_period_duration must be greater than zero.
+    InvalidProposalPeriodDuration = 39,
+    /// The proposal batch was empty.
+    EmptyBatch = 40,
+    /// A proposal in the batch was not in the Queued state.
+    BatchProposalNotQueued = 41,
+    /// The proposal has already been cancelled.
+    ProposalAlreadyCancelled = 42,
 }
 
 /// Cross-contract interface for the Timelock contract.
@@ -1224,18 +1244,23 @@ impl GovernorContract {
     /// Performs a full queued-state preflight for every proposal before
     /// executing any of them, avoiding partial completion in malformed batches.
     pub fn execute_batch(env: Env, proposal_ids: Vec<u64>) {
-        assert!(!proposal_ids.is_empty(), "empty batch");
-
-        for i in 0..proposal_ids.len() {
-            let proposal_id = proposal_ids.get(i).expect("proposal missing");
-            assert!(
-                Self::state(env.clone(), proposal_id) == ProposalState::Queued,
-                "proposal not queued"
-            );
+        if proposal_ids.is_empty() {
+            env.panic_with_error(GovernorError::EmptyBatch);
         }
 
         for i in 0..proposal_ids.len() {
-            let proposal_id = proposal_ids.get(i).expect("proposal missing");
+            let proposal_id = proposal_ids
+                .get(i)
+                .unwrap_or_else(|| env.panic_with_error(GovernorError::ProposalNotFound));
+            if Self::state(env.clone(), proposal_id) != ProposalState::Queued {
+                env.panic_with_error(GovernorError::BatchProposalNotQueued);
+            }
+        }
+
+        for i in 0..proposal_ids.len() {
+            let proposal_id = proposal_ids
+                .get(i)
+                .unwrap_or_else(|| env.panic_with_error(GovernorError::ProposalNotFound));
             Self::execute(env.clone(), proposal_id);
         }
 
@@ -1287,17 +1312,15 @@ impl GovernorContract {
         // Only callable by the governor contract itself
         env.current_contract_address().require_auth();
 
-        let proposal: Proposal = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Proposal(proposal_id))
-            .expect("proposal not found");
+        let proposal: Proposal = Self::must_get_proposal(&env, proposal_id);
 
         // Verify the proposal is not already executed or cancelled
-        assert!(
-            !proposal.executed && !proposal.cancelled,
-            "proposal already executed or cancelled"
-        );
+        if proposal.executed {
+            env.panic_with_error(GovernorError::ProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            env.panic_with_error(GovernorError::ProposalAlreadyCancelled);
+        }
 
         let mut proposal_mut = proposal;
         proposal_mut.cancelled = true;
@@ -1313,7 +1336,7 @@ impl GovernorContract {
                 .storage()
                 .instance()
                 .get(&DataKey::Timelock)
-                .expect("timelock not set");
+                .unwrap_or_else(|| env.panic_with_error(GovernorError::TimelockNotSet));
             let timelock = TimelockClient::new(&env, &timelock_addr);
             let gov_addr = env.current_contract_address();
 
@@ -1682,35 +1705,28 @@ impl GovernorContract {
         }
     }
 
-    fn validate_settings(_env: &Env, new_settings: &GovernorSettings) {
-        assert!(
-            new_settings.voting_delay <= 1_209_600,
-            "voting delay exceeds maximum"
-        );
-        assert!(
-            new_settings.voting_period > 0,
-            "voting period must be positive"
-        );
-        assert!(
-            new_settings.quorum_numerator <= 100,
-            "quorum numerator must be at most 100"
-        );
-        assert!(
-            new_settings.proposal_threshold >= 0,
-            "proposal threshold must be non-negative"
-        );
-        assert!(
-            new_settings.max_calldata_size > 0,
-            "max calldata size must be positive"
-        );
-        assert!(
-            new_settings.max_proposals_per_period > 0,
-            "max proposals per period must be positive"
-        );
-        assert!(
-            new_settings.proposal_period_duration > 0,
-            "proposal period duration must be positive"
-        );
+    fn validate_settings(env: &Env, new_settings: &GovernorSettings) {
+        if new_settings.voting_delay > 1_209_600 {
+            env.panic_with_error(GovernorError::InvalidVotingDelay);
+        }
+        if new_settings.voting_period == 0 {
+            env.panic_with_error(GovernorError::InvalidVotingPeriod);
+        }
+        if new_settings.quorum_numerator > 100 {
+            env.panic_with_error(GovernorError::InvalidQuorumNumerator);
+        }
+        if new_settings.proposal_threshold < 0 {
+            env.panic_with_error(GovernorError::InvalidProposalThreshold);
+        }
+        if new_settings.max_calldata_size == 0 {
+            env.panic_with_error(GovernorError::InvalidMaxCalldataSize);
+        }
+        if new_settings.max_proposals_per_period == 0 {
+            env.panic_with_error(GovernorError::InvalidMaxProposalsPerPeriod);
+        }
+        if new_settings.proposal_period_duration == 0 {
+            env.panic_with_error(GovernorError::InvalidProposalPeriodDuration);
+        }
     }
 
     /// Update governor configuration parameters.
@@ -1739,6 +1755,13 @@ impl GovernorContract {
         env.storage()
             .instance()
             .set(&DataKey::Guardian, &new_settings.guardian);
+        // Fix #597: keep Pauser in sync with Guardian so that rotating the
+        // guardian via a governance proposal also transfers pause authority to
+        // the new guardian.  Without this, the old guardian retained an
+        // irrevocable, invisible backdoor to freeze all governance activity.
+        env.storage()
+            .instance()
+            .set(&DataKey::Pauser, &new_settings.guardian);
         env.storage()
             .instance()
             .set(&DataKey::VoteType, &new_settings.vote_type);
@@ -1797,6 +1820,12 @@ impl GovernorContract {
         env.storage()
             .instance()
             .set(&DataKey::Guardian, &new_guardian);
+        // Fix #597: mirror to Pauser so that standalone guardian rotation also
+        // transfers pause authority; without this the old guardian could still
+        // call pause() even after being replaced.
+        env.storage()
+            .instance()
+            .set(&DataKey::Pauser, &new_guardian);
 
         events::emit_guardian_changed(&env, &old_guardian, &new_guardian);
     }
@@ -1806,7 +1835,9 @@ impl GovernorContract {
     /// Authorization is restricted to the governor's own contract address.
     pub fn update_max_calldata_size(env: Env, max_calldata_size: u32) {
         env.current_contract_address().require_auth();
-        assert!(max_calldata_size > 0, "max calldata size must be positive");
+        if max_calldata_size == 0 {
+            env.panic_with_error(GovernorError::InvalidMaxCalldataSize);
+        }
 
         let old_settings = Self::get_settings(env.clone());
         env.storage()
@@ -1837,10 +1868,9 @@ impl GovernorContract {
     /// Authorization is restricted to the governor's own contract address.
     pub fn update_max_proposals_per_period(env: Env, max_proposals_per_period: u32) {
         env.current_contract_address().require_auth();
-        assert!(
-            max_proposals_per_period > 0,
-            "max proposals per period must be positive"
-        );
+        if max_proposals_per_period == 0 {
+            env.panic_with_error(GovernorError::InvalidMaxProposalsPerPeriod);
+        }
 
         let old_settings = Self::get_settings(env.clone());
         env.storage()
