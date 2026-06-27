@@ -13,6 +13,13 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
+/// Current storage schema version.
+///
+/// Increment this constant when making breaking changes to the on-chain
+/// storage layout so that [`GovernorContract::migrate`] can apply the
+/// corresponding migration step.
+const CURRENT_STORAGE_VERSION: u32 = 1;
+
 /// Governor error codes.
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -351,6 +358,8 @@ pub enum DataKey {
     CachedExecutionWindow,
     /// Ordered list of proposal ids for pagination.
     ProposalList,
+    /// Current storage schema version (for migration tracking).
+    StorageVersion,
 }
 
 #[contract]
@@ -557,6 +566,66 @@ impl GovernorContract {
         env.storage().instance().set(&DataKey::IsPaused, &false);
         // Set admin as initial pauser
         env.storage().instance().set(&DataKey::Pauser, &admin);
+        // Write storage version for migration tracking.
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &CURRENT_STORAGE_VERSION);
+    }
+
+    /// Populate storage keys that may be missing from older deployments.
+    fn apply_migration_v1(env: &Env) {
+        if !env.storage().instance().has(&DataKey::MaxCalldataSize) {
+            env.storage()
+                .instance()
+                .set(&DataKey::MaxCalldataSize, &10_000u32);
+        }
+        if !env.storage().instance().has(&DataKey::ProposalCooldown) {
+            env.storage()
+                .instance()
+                .set(&DataKey::ProposalCooldown, &100u32);
+        }
+        if !env.storage().instance().has(&DataKey::MaxProposalsPerPeriod) {
+            env.storage()
+                .instance()
+                .set(&DataKey::MaxProposalsPerPeriod, &5u32);
+        }
+        if !env.storage().instance().has(&DataKey::ProposalPeriodDuration) {
+            env.storage()
+                .instance()
+                .set(&DataKey::ProposalPeriodDuration, &10_000u32);
+        }
+        if !env.storage().instance().has(&DataKey::IsPaused) {
+            env.storage().instance().set(&DataKey::IsPaused, &false);
+        }
+        if !env.storage().instance().has(&DataKey::Pauser) {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Admin)
+                .expect("admin not set");
+            env.storage().instance().set(&DataKey::Pauser, &admin);
+        }
+        if !env.storage().instance().has(&DataKey::CurrentWasmHash) {
+            env.storage().instance().set(
+                &DataKey::CurrentWasmHash,
+                &BytesN::from_array(env, &[0u8; 32]),
+            );
+        }
+        if !env.storage().instance().has(&DataKey::VotingStrategy) {
+            env.storage()
+                .instance()
+                .set(&DataKey::VotingStrategy, &VotingStrategy::Single);
+        }
+        if !env.storage().instance().has(&DataKey::UseDynamicQuorum) {
+            env.storage()
+                .instance()
+                .set(&DataKey::UseDynamicQuorum, &false);
+        }
+        if !env.storage().persistent().has(&DataKey::ProposalList) {
+            env.storage()
+                .persistent()
+                .set(&DataKey::ProposalList, &Vec::<u64>::new(env));
+        }
     }
 
     /// Create a new governance proposal.
@@ -872,10 +941,6 @@ impl GovernorContract {
         // using the active voting strategy (single token or multi-token weighted).
         let raw_weight: i128 = Self::compute_votes(&env, &voter, &proposal.start_ledger);
 
-        if raw_weight <= 0 {
-            env.panic_with_error(GovernorError::ZeroVotingPower);
-        }
-
         // Apply vote type weighting
         let vote_type: VoteType = env
             .storage()
@@ -884,17 +949,20 @@ impl GovernorContract {
             .unwrap_or(VoteType::Extended);
         let weight = Self::apply_vote_type(vote_type, raw_weight);
 
-        match support {
-            VoteSupport::For => proposal.votes_for += weight,
-            VoteSupport::Against => proposal.votes_against += weight,
-            VoteSupport::Abstain => proposal.votes_abstain += weight,
+        if weight > 0 {
+            match support {
+                VoteSupport::For => proposal.votes_for += weight,
+                VoteSupport::Against => proposal.votes_against += weight,
+                VoteSupport::Abstain => proposal.votes_abstain += weight,
+            }
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(proposal_id), &proposal);
+            // Extend TTL to cover full proposal lifecycle
+            Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
-        // Extend TTL to cover full proposal lifecycle
-        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         env.storage()
             .persistent()
             .set(&DataKey::HasVoted(proposal_id, voter.clone()), &true);
@@ -951,9 +1019,6 @@ impl GovernorContract {
 
         // Look up the voter's snapshot voting power at the proposal's start ledger
         let raw_weight: i128 = Self::compute_votes(&env, &voter, &proposal.start_ledger);
-        if raw_weight <= 0 {
-            env.panic_with_error(GovernorError::ZeroVotingPower);
-        }
 
         // Apply vote type weighting
         let vote_type: VoteType = env
@@ -963,17 +1028,20 @@ impl GovernorContract {
             .unwrap_or(VoteType::Extended);
         let weight = Self::apply_vote_type(vote_type, raw_weight);
 
-        match support {
-            VoteSupport::For => proposal.votes_for += weight,
-            VoteSupport::Against => proposal.votes_against += weight,
-            VoteSupport::Abstain => proposal.votes_abstain += weight,
+        if weight > 0 {
+            match support {
+                VoteSupport::For => proposal.votes_for += weight,
+                VoteSupport::Against => proposal.votes_against += weight,
+                VoteSupport::Abstain => proposal.votes_abstain += weight,
+            }
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Proposal(proposal_id), &proposal);
+            // Extend TTL to cover full proposal lifecycle
+            Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
-        // Extend TTL to cover full proposal lifecycle
-        Self::extend_proposal_ttl(&env, proposal_id, &proposal);
         env.storage()
             .persistent()
             .set(&DataKey::HasVoted(proposal_id, voter.clone()), &true);
@@ -2254,20 +2322,43 @@ impl GovernorContract {
 
     /// Migrate contract storage after a WASM upgrade.
     ///
-    /// Like `upgrade`, this can only be called from the governor's own address
-    /// and must therefore be triggered through an executed on-chain proposal.
-    ///
-    /// This is a no-op stub. When a future upgrade introduces changes to the
-    /// on-chain storage layout, extend [`MigrateData`] with the required
-    /// values and implement the migration logic here.
-    pub fn migrate(env: Env, _data: MigrateData) {
+    /// Reads the current version from storage, applies any missing migration
+    /// steps sequentially, and writes the new version.
+    pub fn migrate(env: Env, data: MigrateData) {
         env.current_contract_address().require_auth();
-        // TODO: implement storage migration logic when a breaking storage
-        // change is introduced in a future upgrade.
 
-        // Post-condition validation guard to ensure VotesToken is not cleared from storage (see #696).
-        if !env.storage().instance().has(&DataKey::VotesToken) {
-            env.panic_with_error(GovernorError::VotesTokenNotSet);
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(0);
+
+        if data.new_version > CURRENT_STORAGE_VERSION {
+            env.panic_with_error(GovernorError::AlreadyInitialized);
+        }
+        if data.new_version < current_version {
+            env.panic_with_error(GovernorError::AlreadyInitialized);
+        }
+        if data.new_version == current_version {
+            return;
+        }
+
+        let mut v = current_version + 1;
+        while v <= data.new_version {
+            Self::apply_migration_step(&env, v);
+            v += 1;
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &data.new_version);
+    }
+
+    /// Dispatch a single migration step by version number.
+    fn apply_migration_step(env: &Env, version: u32) {
+        match version {
+            1 => Self::apply_migration_v1(env),
+            _ => {}
         }
     }
 
@@ -3906,6 +3997,81 @@ mod test {
 
         // The current period-1 count must be 1.
         assert_eq!(client.proposals_in_period(&proposer), 1);
+    }
+
+    #[test]
+    fn test_migrate_updates_storage_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(GovernorContract, ());
+        let client = GovernorContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let votes_token_id = env.register(MockVotesContract, ());
+        let timelock = env.register(MockTimelockContract, ());
+        let guardian = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &votes_token_id,
+            &timelock,
+            &100,
+            &1000,
+            &50,
+            &1000,
+            &guardian,
+            &VoteType::Extended,
+            &120_960,
+        );
+
+        let version: u32 = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::StorageVersion)
+                .unwrap_or(0)
+        });
+        assert_eq!(version, 1, "storage version should be 1 after init");
+
+        let data = MigrateData { new_version: 1 };
+        client.migrate(&data);
+
+        let version: u32 = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&DataKey::StorageVersion)
+                .unwrap_or(0)
+        });
+        assert_eq!(version, 1, "storage version should remain 1 after no-op migrate");
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #32)")]
+    fn test_migrate_rejects_lower_version() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(GovernorContract, ());
+        let client = GovernorContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let votes_token_id = env.register(MockVotesContract, ());
+        let timelock = env.register(MockTimelockContract, ());
+        let guardian = Address::generate(&env);
+
+        client.initialize(
+            &admin,
+            &votes_token_id,
+            &timelock,
+            &100,
+            &1000,
+            &50,
+            &1000,
+            &guardian,
+            &VoteType::Extended,
+            &120_960,
+        );
+
+        let data = MigrateData { new_version: 0 };
+        client.migrate(&data);
     }
 }
 

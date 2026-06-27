@@ -78,6 +78,8 @@ pub enum LiquidityError {
     InsufficientReserves = 6,
     /// Input and output outcomes must be different.
     SameOutcome = 7,
+    /// LP tokens minted are below the caller's minimum.
+    SlippageExceeded = 8,
 }
 
 #[contract]
@@ -179,6 +181,7 @@ impl LiquidityContract {
         outcome_b: u32,
         amount_a: i128,
         amount_b: i128,
+        min_lp_tokens_out: i128,
     ) -> (i128, i128) {
         provider.require_auth();
 
@@ -234,6 +237,10 @@ impl LiquidityContract {
             }
             (lp, required_b)
         };
+
+        if lp_tokens < min_lp_tokens_out {
+            env.panic_with_error(LiquidityError::SlippageExceeded);
+        }
 
         // Effects
         pool.reserve_a = Self::checked_add(&env, pool.reserve_a, amount_a);

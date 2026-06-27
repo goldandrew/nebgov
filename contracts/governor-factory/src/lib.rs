@@ -4,7 +4,7 @@
 
 use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
-    Address, BytesN, Env,
+    Address, BytesN, Env, Vec,
 };
 
 const DEPLOYED_CONTRACT_COUNT: i128 = 3;
@@ -19,6 +19,7 @@ pub enum FactoryError {
     InvalidTimelockDelay = 3,
     InvalidVoteType = 4,
     InsufficientBalance = 5,
+    WasmNotFound = 6,
 }
 
 #[contracttype]
@@ -49,6 +50,7 @@ pub enum DataKey {
     TokenVotesWasm,
     Admin,
     NativeToken,
+    GovernorList,
 }
 
 #[contractclient(name = "TokenVotesClient")]
@@ -112,6 +114,9 @@ impl GovernorFactoryContract {
             .instance()
             .set(&DataKey::TokenVotesWasm, &token_votes_wasm);
         env.storage().instance().set(&DataKey::GovernorCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorList, &Vec::<u64>::new(&env));
     }
 
     /// Configure the network native asset token contract used for deployer
@@ -317,6 +322,16 @@ impl GovernorFactoryContract {
             .set(&DataKey::Governor(id), &entry);
         env.storage().instance().set(&DataKey::GovernorCount, &id);
 
+        let mut list: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorList)
+            .unwrap_or(Vec::<u64>::new(&env));
+        list.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorList, &list);
+
         env.events().publish(
             (
                 symbol_short!("deploy"),
@@ -337,6 +352,27 @@ impl GovernorFactoryContract {
             .persistent()
             .get(&DataKey::Governor(id))
             .expect("governor not found")
+    }
+
+    /// Get a paginated list of all registered governors.
+    pub fn get_all_governors(env: Env, offset: u32, limit: u32) -> Vec<GovernorEntry> {
+        let list: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorList)
+            .unwrap_or(Vec::<u64>::new(&env));
+        let len = list.len();
+        let start = (offset as u32).min(len as u32);
+        let end = ((offset + limit) as u32).min(len as u32);
+        let mut entries = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            let id = list.get(i).unwrap();
+            let entry = Self::get_governor(env.clone(), id);
+            entries.push_back(entry);
+            i += 1;
+        }
+        entries
     }
 
     /// Get total number of deployed governors.
