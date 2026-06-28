@@ -1,4 +1,7 @@
 #![no_std]
+
+// the new module
+pub mod error;
 #![allow(clippy::too_many_arguments)]
 // Prevent future introduction of dead match patterns in this security-critical
 // state machine (issue #439).
@@ -6,6 +9,8 @@
 
 mod events;
 
+// Import the error type into the current scope
+use crate::error::GovernorError;
 use soroban_sdk::xdr::FromXdr;
 use soroban_sdk::{
     auth::{ContractContext, InvokerContractAuthEntry, SubContractInvocation},
