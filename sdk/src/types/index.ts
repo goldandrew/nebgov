@@ -118,6 +118,8 @@ export interface GovernorConfig {
   maxAttempts?: number;
   /** Base delay in milliseconds for exponential backoff (default: 1000) */
   baseDelayMs?: number;
+  /** Token decimals for vote display (optional — fetched from contract if not provided) */
+  decimals?: number;
 }
 
 export interface TimelockOperation {

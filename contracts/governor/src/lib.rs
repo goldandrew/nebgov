@@ -351,6 +351,8 @@ pub enum DataKey {
     CachedExecutionWindow,
     /// Ordered list of proposal ids for pagination.
     ProposalList,
+    /// Token decimals for vote display formatting.
+    Decimals,
 }
 
 #[contract]
@@ -478,6 +480,7 @@ impl GovernorContract {
         guardian: Address,
         vote_type: VoteType,
         proposal_grace_period: u32,
+        decimals: u32,
     ) {
         admin.require_auth();
         if env.storage().instance().has(&DataKey::Admin) {
@@ -553,7 +556,9 @@ impl GovernorContract {
         env.storage()
             .instance()
             .set(&DataKey::ProposalPeriodDuration, &10_000u32); // ~24 hour period
-                                                                // Initialize pause state (not paused by default)
+        // Store token decimals for vote display formatting
+        env.storage().instance().set(&DataKey::Decimals, &decimals);
+        // Initialize pause state (not paused by default)
         env.storage().instance().set(&DataKey::IsPaused, &false);
         // Set admin as initial pauser
         env.storage().instance().set(&DataKey::Pauser, &admin);
@@ -1680,6 +1685,15 @@ impl GovernorContract {
                 .get(&DataKey::ProposalPeriodDuration)
                 .unwrap_or(10_000),
         }
+    }
+
+    /// Get the token decimals for vote display formatting.
+    /// Returns 7 (Stellar native asset standard) as default for backwards compatibility.
+    pub fn get_decimals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Decimals)
+            .unwrap_or(7)
     }
 
     fn validate_settings(_env: &Env, new_settings: &GovernorSettings) {
