@@ -125,6 +125,8 @@ export class GovernorClient {
   private readonly server: SorobanRpc.Server;
   private readonly contract: Contract;
   private readonly networkPassphrase: string;
+  private decimals?: number;
+  private divisor?: bigint;
 
   constructor(config: GovernorConfig) {
     this.config = config;
@@ -132,6 +134,12 @@ export class GovernorClient {
     this.server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
     this.contract = new Contract(config.governorAddress);
     this.networkPassphrase = NETWORK_PASSPHRASES[config.network];
+    
+    // If decimals provided in config, use it immediately
+    if (config.decimals !== undefined) {
+      this.decimals = config.decimals;
+      this.divisor = 10n ** BigInt(this.decimals);
+    }
   }
 
   private async retry<T>(
@@ -183,6 +191,60 @@ export class GovernorClient {
     }
 
     return false;
+  }
+
+  /**
+   * Fetch token decimals from the governor contract.
+   * This is called lazily when decimals are needed but not provided in config.
+   */
+  private async fetchDecimals(): Promise<void> {
+    if (this.decimals !== undefined) return;
+
+    try {
+      const result = await this.retry(async () => {
+        return await this.server.simulateTransaction(
+          new TransactionBuilder(
+            await this.server.getAccount(this.readAccount()),
+            { fee: BASE_FEE, networkPassphrase: this.networkPassphrase },
+          )
+            .addOperation(this.contract.call("get_decimals"))
+            .setTimeout(30)
+            .build(),
+        );
+      });
+
+      if (SorobanRpc.Api.isSimulationError(result)) {
+        // Contract doesn't have get_decimals or failed — default to 7
+        this.decimals = 7;
+      } else {
+        const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+          .result?.retval;
+        this.decimals = raw ? Number(scValToNative(raw)) : 7;
+      }
+    } catch {
+      // Fetch failed — default to 7 (Stellar native asset standard)
+      this.decimals = 7;
+    }
+
+    this.divisor = 10n ** BigInt(this.decimals);
+  }
+
+  /**
+   * Get the token decimals for vote display.
+   * Fetches from contract if not provided in config.
+   */
+  async getDecimals(): Promise<number> {
+    await this.fetchDecimals();
+    return this.decimals!;
+  }
+
+  /**
+   * Get the divisor for converting raw vote counts to display values.
+   * Fetches decimals from contract if not already available.
+   */
+  async getDivisor(): Promise<bigint> {
+    await this.fetchDecimals();
+    return this.divisor!;
   }
 
   /**

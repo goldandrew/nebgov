@@ -582,7 +582,7 @@ impl GovernorContract {
         env.storage()
             .instance()
             .set(&DataKey::ProposalPeriodDuration, &10_000u32); // ~24 hour period
-                                                                // Initialize pause state (not paused by default)
+        // Initialize pause state (not paused by default)
         env.storage().instance().set(&DataKey::IsPaused, &false);
         // Set admin as initial pauser
         env.storage().instance().set(&DataKey::Pauser, &admin);
