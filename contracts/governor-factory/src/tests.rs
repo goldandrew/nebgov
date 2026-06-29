@@ -29,7 +29,67 @@ fn upload_wasms(env: &Env) -> (BytesN<32>, BytesN<32>, BytesN<32>) {
     (governor_hash, timelock_hash, token_votes_hash)
 }
 
-// ─── double-initialize guard ──────────────────────────────────────────────────
+// ─── GovernorDeployed event ───────────────────────────────────────────────────
+
+#[test]
+fn test_deploy_emits_governor_deployed_event_with_all_addresses() {
+    use crate::events::GovernorDeployedEvent;
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryIntoVal;
+
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    env.register(GovernorContract, ());
+    env.register(TimelockContract, ());
+    env.register(TokenVotesContract, ());
+
+    let (governor_hash, timelock_hash, token_votes_hash) = upload_wasms(&env);
+
+    let admin = Address::generate(&env);
+    let deployer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    let factory_id = env.register(GovernorFactoryContract, ());
+    let factory = GovernorFactoryContractClient::new(&env, &factory_id);
+    factory.initialize(&admin, &governor_hash, &timelock_hash, &token_votes_hash);
+
+    env.ledger().with_mut(|l| l.timestamp = 12_345);
+
+    let id = factory.deploy(
+        &deployer,
+        &token,
+        &100u32,
+        &1000u32,
+        &50u32,
+        &0i128,
+        &3600u64,
+        &guardian,
+        &1u32,
+        &120_960u32,
+    );
+    let entry = factory.get_governor(&id);
+
+    let events = env.events().all();
+    let (_, _, event_data) = events
+        .iter()
+        .find(|(addr, _, _)| *addr == factory_id)
+        .expect("expected a GovernorDeployed event from the factory");
+
+    let decoded: GovernorDeployedEvent = event_data
+        .try_into_val(&env)
+        .expect("event data should decode as GovernorDeployedEvent");
+
+    assert_eq!(decoded.id, id);
+    assert_eq!(decoded.governor, entry.governor);
+    assert_eq!(decoded.timelock, entry.timelock);
+    assert_eq!(decoded.token_votes, entry.token);
+    assert_eq!(decoded.deployer, deployer);
+    assert_eq!(decoded.timestamp, 12_345);
+}
+
+
 
 #[test]
 #[should_panic(expected = "already initialized")]

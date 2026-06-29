@@ -7,6 +7,9 @@ use soroban_sdk::{
     Address, BytesN, Env, Vec,
 };
 
+mod events;
+use events::emit_governor_deployed;
+
 const DEPLOYED_CONTRACT_COUNT: i128 = 3;
 const MIN_CONTRACT_RESERVE_STROOPS: i128 = 5_000_000;
 

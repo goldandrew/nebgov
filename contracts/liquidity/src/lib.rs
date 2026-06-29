@@ -505,6 +505,18 @@ impl LiquidityContract {
             .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound))
     }
 
+    /// Get the current pool state without panicking if the pool does not exist.
+    ///
+    /// Returns `Some(Pool)` if a pool for the given outcome pair has been
+    /// created, or `None` otherwise. Use this to check pool existence before
+    /// attempting operations like `add_liquidity` or `swap`, which require an
+    /// already-initialized pool.
+    pub fn get_pool_safe(env: Env, outcome_a: u32, outcome_b: u32) -> Option<Pool> {
+        env.storage()
+            .persistent()
+            .get(&Self::pool_key(outcome_a, outcome_b))
+    }
+
     /// Get immutable metadata recorded when the pool was initialized.
     pub fn get_pool_metadata(env: Env, outcome_a: u32, outcome_b: u32) -> PoolMetadata {
         env.storage()
