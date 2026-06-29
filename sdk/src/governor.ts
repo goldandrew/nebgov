@@ -59,7 +59,7 @@ export interface MetadataUploadOptions {
   customUploader?: (content: string) => Promise<string>;
 }
 
-import { GovernorError, GovernorErrorCode } from "./errors";
+import { GovernorError, GovernorErrorCode, parseGovernorError } from "./errors";
 import { hexToBytes32, withRetry } from "./utils";
 
 const RPC_URLS: Record<Network, string> = {
@@ -117,8 +117,6 @@ function scVecBytes(blobs: (Buffer | Uint8Array)[]): xdr.ScVal {
 
 /**
  * GovernorClient — interact with a deployed NebGov governor contract.
- *
- * TODO issue #14: add full error handling, retry logic, and simulation flow.
  */
 export class GovernorClient {
   private readonly config: GovernorConfig;
@@ -1219,6 +1217,13 @@ export class GovernorClient {
    * The proposal must be in the Queued state. After execution, it enters
    * the Executed state.
    *
+   * The transaction is simulated before it is broadcast. If the simulation
+   * exposes a contract error (invalid calldata, insufficient permissions,
+   * wrong function name, etc.) a typed {@link GovernorError} carrying a
+   * human-readable message is thrown and no transaction is submitted, so the
+   * caller can surface the problem to the user without spending an on-chain
+   * fee. Transient RPC failures are retried with exponential backoff.
+   *
    * @param signer    Keypair authorising the call
    * @param proposalId The ID of the proposal to execute
    */
@@ -1227,31 +1232,49 @@ export class GovernorClient {
     proposalId: bigint,
   ): Promise<void> {
     return this.retry(async () => {
-      const account = await this.server.getAccount(signer.publicKey());
+      const tx = await this.buildExecuteTx(signer, proposalId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: this.networkPassphrase,
-      })
-        .addOperation(
-          this.contract.call(
-            "execute",
-            nativeToScVal(proposalId, { type: "u64" }),
-          ),
-        )
-        .setTimeout(30)
-        .build();
+      const simResult = await this.server.simulateTransaction(tx);
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        throw parseGovernorError(simResult);
+      }
 
-      const prepared = await this.server.prepareTransaction(tx);
+      const prepared = SorobanRpc.assembleTransaction(tx, simResult).build();
       prepared.sign(signer);
 
       const result = await this.server.sendTransaction(prepared);
       if (result.status === "ERROR") {
-        throw new Error(`execute failed: ${JSON.stringify(result)}`);
+        throw new GovernorError(
+          GovernorErrorCode.TransactionFailed,
+          `execute failed: ${JSON.stringify(result)}`,
+        );
       }
 
       await this.pollForConfirmation(result.hash);
     }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
+   * Build (but do not sign or submit) the `execute` transaction for a proposal.
+   */
+  private async buildExecuteTx(
+    signer: Keypair,
+    proposalId: bigint,
+  ) {
+    const account = await this.server.getAccount(signer.publicKey());
+
+    return new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          "execute",
+          nativeToScVal(proposalId, { type: "u64" }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
   }
 
   /**
