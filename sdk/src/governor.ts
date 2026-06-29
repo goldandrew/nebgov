@@ -1057,6 +1057,49 @@ export class GovernorClient {
   }
 
   /**
+   * Cast a vote using a raw u32 vote choice.
+   *
+   * This is a convenience method that accepts vote_choice as a raw number
+   * (0 = Against, 1 = For, 2 = Abstain) and validates it on-chain.
+   * Invalid vote choices (> 2) will throw GovernorError with InvalidVoteChoice code.
+   *
+   * @returns The Stellar transaction hash, suitable for linking to a block explorer.
+   */
+  async vote(
+    signer: Keypair,
+    proposalId: bigint,
+    voteChoice: number,
+  ): Promise<string> {
+    return this.retry(async () => {
+      const account = await this.server.getAccount(signer.publicKey());
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "vote",
+            nativeToScVal(signer.publicKey(), { type: "address" }),
+            nativeToScVal(proposalId, { type: "u64" }),
+            nativeToScVal(voteChoice, { type: "u32" }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      prepared.sign(signer);
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new Error(`vote failed: ${JSON.stringify(result)}`);
+      }
+      await this.pollForConfirmation(result.hash);
+      return result.hash;
+    }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
    * Cancel a proposal (can only be done by the proposer while it's Pending).
    */
   async cancel(
