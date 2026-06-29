@@ -169,17 +169,29 @@ async function handleProposalCreated(
   event: SorobanRpc.Api.EventResponse,
   topics: unknown[],
 ): Promise<void> {
-  const proposer = topics[1] as string;
-  const data = scValToNative(event.value) as unknown[];
-  const [id, description, , , , startLedger, endLedger] = data as [
-    bigint,
-    string,
-    unknown,
-    unknown,
-    unknown,
-    number,
-    number,
-  ];
+  const raw = scValToNative(event.value);
+  let id: bigint;
+  let proposer: string;
+  let description: string;
+  let startLedger: number;
+  let endLedger: number;
+
+  if (Array.isArray(raw)) {
+    // Legacy tuple format from raw env.events().publish()
+    id = raw[0] as bigint;
+    proposer = topics[1] as string;
+    description = String(raw[1] ?? "");
+    startLedger = raw[5] as number;
+    endLedger = raw[6] as number;
+  } else {
+    // Struct format from emit_proposal_created()
+    const data = raw as Record<string, unknown>;
+    id = data.proposal_id as bigint;
+    proposer = String(data.proposer ?? "");
+    description = String(data.description ?? "");
+    startLedger = Number(data.start_ledger);
+    endLedger = Number(data.end_ledger);
+  }
 
   invalidatePattern("proposals:");
   await pool.query(

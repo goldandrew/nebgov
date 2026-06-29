@@ -772,22 +772,6 @@ impl GovernorContract {
             period_duration.saturating_add(1000),
         );
 
-        // Emit ProposalCreated event with all proposal fields
-        env.events().publish(
-            (symbol_short!("prop_crtd"), proposer.clone()),
-            (
-                proposal_id,
-                description,
-                description_hash,
-                metadata_uri,
-                targets,
-                fn_names,
-                calldatas,
-                current + voting_delay,
-                current + voting_delay + voting_period,
-            ),
-        );
-
         events::emit_proposal_created(&env, &proposal);
 
         proposal_id
@@ -1710,6 +1694,11 @@ impl GovernorContract {
         assert!(
             new_settings.proposal_period_duration > 0,
             "proposal period duration must be positive"
+        );
+        assert!(
+            (new_settings.voting_delay as u64) + (new_settings.voting_period as u64)
+                <= u32::MAX as u64,
+            "voting_delay + voting_period overflows u32"
         );
     }
 
