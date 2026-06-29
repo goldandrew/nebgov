@@ -125,6 +125,8 @@ export class GovernorClient {
   private readonly server: SorobanRpc.Server;
   private readonly contract: Contract;
   private readonly networkPassphrase: string;
+  private decimals?: number;
+  private divisor?: bigint;
 
   constructor(config: GovernorConfig) {
     this.config = config;
@@ -132,6 +134,12 @@ export class GovernorClient {
     this.server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
     this.contract = new Contract(config.governorAddress);
     this.networkPassphrase = NETWORK_PASSPHRASES[config.network];
+    
+    // If decimals provided in config, use it immediately
+    if (config.decimals !== undefined) {
+      this.decimals = config.decimals;
+      this.divisor = 10n ** BigInt(this.decimals);
+    }
   }
 
   private async retry<T>(
@@ -183,6 +191,60 @@ export class GovernorClient {
     }
 
     return false;
+  }
+
+  /**
+   * Fetch token decimals from the governor contract.
+   * This is called lazily when decimals are needed but not provided in config.
+   */
+  private async fetchDecimals(): Promise<void> {
+    if (this.decimals !== undefined) return;
+
+    try {
+      const result = await this.retry(async () => {
+        return await this.server.simulateTransaction(
+          new TransactionBuilder(
+            await this.server.getAccount(this.readAccount()),
+            { fee: BASE_FEE, networkPassphrase: this.networkPassphrase },
+          )
+            .addOperation(this.contract.call("get_decimals"))
+            .setTimeout(30)
+            .build(),
+        );
+      });
+
+      if (SorobanRpc.Api.isSimulationError(result)) {
+        // Contract doesn't have get_decimals or failed — default to 7
+        this.decimals = 7;
+      } else {
+        const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+          .result?.retval;
+        this.decimals = raw ? Number(scValToNative(raw)) : 7;
+      }
+    } catch {
+      // Fetch failed — default to 7 (Stellar native asset standard)
+      this.decimals = 7;
+    }
+
+    this.divisor = 10n ** BigInt(this.decimals);
+  }
+
+  /**
+   * Get the token decimals for vote display.
+   * Fetches from contract if not provided in config.
+   */
+  async getDecimals(): Promise<number> {
+    await this.fetchDecimals();
+    return this.decimals!;
+  }
+
+  /**
+   * Get the divisor for converting raw vote counts to display values.
+   * Fetches decimals from contract if not already available.
+   */
+  async getDivisor(): Promise<bigint> {
+    await this.fetchDecimals();
+    return this.divisor!;
   }
 
   /**
@@ -1091,6 +1153,133 @@ export class GovernorClient {
     }
 
     await this.pollForConfirmation(result.hash);
+  }
+
+  /**
+   * Queue a succeeded proposal, scheduling its actions via the Timelock.
+   *
+   * The proposal must be in the Succeeded state. After queuing, it enters
+   * the Queued state and becomes executable once the Timelock delay elapses.
+   *
+   * @param signer    Keypair authorising the call
+   * @param proposalId The ID of the proposal to queue
+   */
+  async queue(
+    signer: Keypair,
+    proposalId: bigint,
+  ): Promise<void> {
+    return this.retry(async () => {
+      const account = await this.server.getAccount(signer.publicKey());
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "queue",
+            nativeToScVal(proposalId, { type: "u64" }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      prepared.sign(signer);
+
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new Error(`queue failed: ${JSON.stringify(result)}`);
+      }
+
+      await this.pollForConfirmation(result.hash);
+    }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
+   * Execute a queued proposal after its Timelock delay has elapsed.
+   *
+   * The proposal must be in the Queued state. After execution, it enters
+   * the Executed state.
+   *
+   * @param signer    Keypair authorising the call
+   * @param proposalId The ID of the proposal to execute
+   */
+  async execute(
+    signer: Keypair,
+    proposalId: bigint,
+  ): Promise<void> {
+    return this.retry(async () => {
+      const account = await this.server.getAccount(signer.publicKey());
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "execute",
+            nativeToScVal(proposalId, { type: "u64" }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      prepared.sign(signer);
+
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new Error(`execute failed: ${JSON.stringify(result)}`);
+      }
+
+      await this.pollForConfirmation(result.hash);
+    }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
+   * Execute multiple queued proposals atomically via execute_batch.
+   *
+   * All proposals must be in the Queued state. Either all are executed or
+   * none are.
+   *
+   * @param signer      Keypair authorising the call
+   * @param proposalIds Array of proposal IDs to execute
+   */
+  async executeBatch(
+    signer: Keypair,
+    proposalIds: bigint[],
+  ): Promise<void> {
+    return this.retry(async () => {
+      const account = await this.server.getAccount(signer.publicKey());
+
+      const idsScVal = xdr.ScVal.scvVec(
+        proposalIds.map((id) => nativeToScVal(id, { type: "u64" })),
+      );
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "execute_batch",
+            idsScVal,
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      prepared.sign(signer);
+
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new Error(`executeBatch failed: ${JSON.stringify(result)}`);
+      }
+
+      await this.pollForConfirmation(result.hash);
+    }, (e) => this.isRetryableSubmissionError(e));
   }
 
   /**
