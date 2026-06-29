@@ -866,22 +866,6 @@ impl GovernorContract {
             period_duration.saturating_add(1000),
         );
 
-        // Emit ProposalCreated event with all proposal fields
-        env.events().publish(
-            (symbol_short!("prop_crtd"), proposer.clone()),
-            (
-                proposal_id,
-                description,
-                description_hash,
-                metadata_uri,
-                targets,
-                fn_names,
-                calldatas,
-                current + voting_delay,
-                current + voting_delay + voting_period,
-            ),
-        );
-
         events::emit_proposal_created(&env, &proposal);
 
         proposal_id

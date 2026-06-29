@@ -169,7 +169,7 @@ fn test_initialize_pool_records_zero_reserve_pool_and_metadata() {
 }
 
 #[test]
-#[should_panic(expected = "pool not initialized")]
+#[should_panic(expected = "#5")]
 fn test_add_liquidity_rejects_uninitialized_pool() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -179,7 +179,7 @@ fn test_add_liquidity_rejects_uninitialized_pool() {
 }
 
 #[test]
-#[should_panic(expected = "only governor")]
+#[should_panic(expected = "#12")]
 fn test_initialize_pool_rejects_non_governor() {
     let (env, contract_id, _, provider, _, _token_a, _token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -188,7 +188,7 @@ fn test_initialize_pool_rejects_non_governor() {
 }
 
 #[test]
-#[should_panic(expected = "only governor")]
+#[should_panic(expected = "#12")]
 fn test_create_pool_rejects_non_governor() {
     let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -245,7 +245,7 @@ fn test_update_pool_fee_changes_fee_for_governor() {
 }
 
 #[test]
-#[should_panic(expected = "only governor")]
+#[should_panic(expected = "#12")]
 fn test_update_pool_fee_rejects_non_governor() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -257,7 +257,7 @@ fn test_update_pool_fee_rejects_non_governor() {
 }
 
 #[test]
-#[should_panic(expected = "amounts must be positive")]
+#[should_panic(expected = "#1")]
 fn test_add_liquidity_rejects_zero_amounts() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -282,7 +282,7 @@ fn test_add_liquidity_rejects_arithmetic_overflow() {
 }
 
 #[test]
-#[should_panic(expected = "fee too high")]
+#[should_panic(expected = "#10")]
 fn test_update_pool_fee_rejects_excessive_fee() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -399,7 +399,7 @@ fn test_governor_proposal_executes_liquidity_fee_update() {
 // ============================================================================
 
 #[test]
-#[should_panic(expected = "imbalanced deposit")]
+#[should_panic(expected = "#3")]
 fn test_add_liquidity_rejects_amount_b_below_ratio() {
     // Pool has a 1:2 ratio (A:B). A subsequent deposit providing too little B
     // must be rejected so the pool price cannot be manipulated downward.
@@ -557,7 +557,7 @@ fn test_add_liquidity_returns_actual_deposit_b() {
 }
 
 #[test]
-#[should_panic(expected = "below minimum liquidity")]
+#[should_panic(expected = "#8")]
 fn test_add_liquidity_rejects_required_b_below_minimum() {
     // On a heavily skewed pool (large reserve_a, tiny reserve_b), required_b for
     // a small deposit rounds down below MIN_LIQUIDITY. This must be rejected even
@@ -594,7 +594,7 @@ fn test_add_liquidity_rejects_slippage_below_min_lp() {
 }
 
 #[test]
-#[should_panic(expected = "deposit too small: zero LP tokens would be minted")]
+#[should_panic(expected = "#13")]
 fn test_add_liquidity_rejects_deposit_that_mints_zero_lp_tokens() {
     // When reserve_a >> total_lp (which occurs after heavy A-in swaps), integer
     // division in `lp = amount_a * total_lp / reserve_a` yields 0 even for a
@@ -629,7 +629,7 @@ fn test_add_liquidity_rejects_deposit_that_mints_zero_lp_tokens() {
 // ============================================================================
 
 #[test]
-#[should_panic(expected = "invalid amount")]
+#[should_panic(expected = "#1")]
 fn test_remove_liquidity_rejects_zero_shares() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -642,7 +642,7 @@ fn test_remove_liquidity_rejects_zero_shares() {
 }
 
 #[test]
-#[should_panic(expected = "invalid amount")]
+#[should_panic(expected = "#1")]
 fn test_remove_liquidity_rejects_negative_shares() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -655,7 +655,7 @@ fn test_remove_liquidity_rejects_negative_shares() {
 }
 
 #[test]
-#[should_panic(expected = "insufficient shares")]
+#[should_panic(expected = "#2")]
 fn test_remove_liquidity_rejects_excessive_shares() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -670,7 +670,7 @@ fn test_remove_liquidity_rejects_excessive_shares() {
 }
 
 #[test]
-#[should_panic(expected = "insufficient shares")]
+#[should_panic(expected = "#2")]
 fn test_remove_liquidity_rejects_zero_share_provider_positive_amount() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
@@ -797,6 +797,16 @@ fn test_liquidity_error_codes_snapshot() {
     assert_eq!(LiquidityError::InvalidAmount as u32, 1);
     assert_eq!(LiquidityError::InsufficientShares as u32, 2);
     assert_eq!(LiquidityError::ImbalancedDeposit as u32, 3);
+    assert_eq!(LiquidityError::ArithmeticOverflow as u32, 4);
+    assert_eq!(LiquidityError::PoolNotFound as u32, 5);
+    assert_eq!(LiquidityError::InsufficientReserves as u32, 6);
+    assert_eq!(LiquidityError::SameOutcome as u32, 7);
+    assert_eq!(LiquidityError::BelowMinLiquidity as u32, 8);
+    assert_eq!(LiquidityError::AlreadyInitialized as u32, 9);
+    assert_eq!(LiquidityError::FeeTooHigh as u32, 10);
+    assert_eq!(LiquidityError::SlippageExceeded as u32, 11);
+    assert_eq!(LiquidityError::NotGovernor as u32, 12);
+    assert_eq!(LiquidityError::DepositTooSmall as u32, 13);
 }
 
 // ============================================================================

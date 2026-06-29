@@ -27,6 +27,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 
 const MIN_LIQUIDITY: i128 = 1_000;
 const MAX_FEE_BPS: u32 = 1_000;
+const TTL_LEDGERS: u32 = 6_307_200;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,10 +91,9 @@ impl LiquidityContract {
     /// Initialize the contract with the governor that owns privileged actions.
     pub fn initialize(env: Env, governor: Address) {
         governor.require_auth();
-        assert!(
-            !env.storage().instance().has(&DataKey::Governor),
-            "already initialized"
-        );
+        if env.storage().instance().has(&DataKey::Governor) {
+            env.panic_with_error(LiquidityError::AlreadyInitialized);
+        }
         env.storage().instance().set(&DataKey::Governor, &governor);
     }
 
@@ -102,7 +102,7 @@ impl LiquidityContract {
         env.storage()
             .instance()
             .get(&DataKey::Governor)
-            .expect("not initialized")
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound))
     }
 
     /// Register a new pool's token addresses. Must be called once before adding liquidity.
@@ -127,7 +127,7 @@ impl LiquidityContract {
 
         let tokens_key = DataKey::PoolTokens(lo, hi);
         if env.storage().persistent().has(&tokens_key) {
-            panic!("pool already exists");
+            env.panic_with_error(LiquidityError::AlreadyInitialized);
         }
         env.storage()
             .persistent()
@@ -149,12 +149,12 @@ impl LiquidityContract {
         Self::require_governor(&env, &caller);
 
         if fee_bps > MAX_FEE_BPS {
-            panic!("fee too high");
+            env.panic_with_error(LiquidityError::FeeTooHigh);
         }
 
         let pool_key = Self::pool_key(outcome_a, outcome_b);
         if env.storage().persistent().has(&pool_key) {
-            panic!("pool already initialized");
+            env.panic_with_error(LiquidityError::AlreadyInitialized);
         }
 
         let pool = Pool {
@@ -170,9 +170,12 @@ impl LiquidityContract {
         };
 
         env.storage().persistent().set(&pool_key, &pool);
+        env.storage().persistent().extend_ttl(&pool_key, TTL_LEDGERS, TTL_LEDGERS);
+        let metadata_key = Self::pool_metadata_key(outcome_a, outcome_b);
         env.storage()
             .persistent()
-            .set(&Self::pool_metadata_key(outcome_a, outcome_b), &metadata);
+            .set(&metadata_key, &metadata);
+        env.storage().persistent().extend_ttl(&metadata_key, TTL_LEDGERS, TTL_LEDGERS);
     }
 
     /// Add liquidity to a pool and mint LP shares.
@@ -194,7 +197,7 @@ impl LiquidityContract {
         provider.require_auth();
 
         if amount_a <= 0 || amount_b <= 0 {
-            panic!("amounts must be positive");
+            env.panic_with_error(LiquidityError::InvalidAmount);
         }
 
         // Normalize outcome pair so Pool(a,b) and Pool(b,a) share the same storage slot.
@@ -251,7 +254,7 @@ impl LiquidityContract {
             }
             let lp = Self::checked_mul(&env, lo_amount, pool.total_lp_supply) / pool.reserve_a;
             if lp == 0 {
-                panic!("deposit too small: zero LP tokens would be minted");
+                env.panic_with_error(LiquidityError::DepositTooSmall);
             }
             (lp, required_hi)
         };
@@ -267,7 +270,9 @@ impl LiquidityContract {
         position.lp_tokens = Self::checked_add(&env, position.lp_tokens, lp_tokens);
 
         env.storage().persistent().set(&pool_key, &pool);
+        env.storage().persistent().extend_ttl(&pool_key, TTL_LEDGERS, TTL_LEDGERS);
         env.storage().persistent().set(&position_key, &position);
+        env.storage().persistent().extend_ttl(&position_key, TTL_LEDGERS, TTL_LEDGERS);
 
         // Interactions
         TokenClient::new(&env, &token_lo).transfer(
@@ -303,13 +308,13 @@ impl LiquidityContract {
         // Security: validate caller inputs before any state mutation or token transfer.
         // A failed check here leaves contract state unchanged.
         if lp_tokens <= 0 {
-            panic!("invalid amount");
+            env.panic_with_error(LiquidityError::InvalidAmount);
         }
 
         let provider_shares =
             Self::get_lp_position(env.clone(), provider.clone(), outcome_a, outcome_b);
         if lp_tokens > provider_shares {
-            panic!("insufficient shares");
+            env.panic_with_error(LiquidityError::InsufficientShares);
         }
 
         // Normalize outcome pair so Pool(a,b) and Pool(b,a) share the same storage slot.
@@ -333,7 +338,7 @@ impl LiquidityContract {
             .storage()
             .persistent()
             .get(&position_key)
-            .expect("no LP position");
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::InsufficientShares));
 
         let tokens_key = DataKey::PoolTokens(lo, hi);
         let stored_tokens: Option<(Address, Address)> = env.storage().persistent().get(&tokens_key);
@@ -348,7 +353,7 @@ impl LiquidityContract {
         if (remaining_lo > 0 && remaining_lo < MIN_LIQUIDITY)
             || (remaining_hi > 0 && remaining_hi < MIN_LIQUIDITY)
         {
-            panic!("below minimum liquidity");
+            env.panic_with_error(LiquidityError::BelowMinLiquidity);
         }
 
         // Effects
@@ -358,7 +363,9 @@ impl LiquidityContract {
         position.lp_tokens -= lp_tokens;
 
         env.storage().persistent().set(&pool_key, &pool);
+        env.storage().persistent().extend_ttl(&pool_key, TTL_LEDGERS, TTL_LEDGERS);
         env.storage().persistent().set(&position_key, &position);
+        env.storage().persistent().extend_ttl(&position_key, TTL_LEDGERS, TTL_LEDGERS);
 
         // Interactions
         TokenClient::new(&env, &token_lo).transfer(
@@ -440,7 +447,7 @@ impl LiquidityContract {
         let amount_out_with_fee = amount_out - fee;
 
         if amount_out_with_fee < min_amount_out {
-            panic!("slippage exceeded");
+            env.panic_with_error(LiquidityError::SlippageExceeded);
         }
 
         // Effects: update the correct reserves based on direction.
@@ -452,6 +459,7 @@ impl LiquidityContract {
             pool.reserve_a -= amount_out_with_fee;
         }
         env.storage().persistent().set(&pool_key, &pool);
+        env.storage().persistent().extend_ttl(&pool_key, TTL_LEDGERS, TTL_LEDGERS);
 
         // Interactions
         TokenClient::new(&env, &token_in).transfer(
@@ -482,7 +490,7 @@ impl LiquidityContract {
         Self::require_governor(&env, &caller);
 
         if fee_bps > MAX_FEE_BPS {
-            panic!("fee too high");
+            env.panic_with_error(LiquidityError::FeeTooHigh);
         }
 
         let pool_key = Self::pool_key(outcome_a, outcome_b);
@@ -490,10 +498,11 @@ impl LiquidityContract {
             .storage()
             .persistent()
             .get(&pool_key)
-            .expect("pool not found");
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
         let old_fee_bps = pool.fee_bps;
         pool.fee_bps = fee_bps;
         env.storage().persistent().set(&pool_key, &pool);
+        env.storage().persistent().extend_ttl(&pool_key, TTL_LEDGERS, TTL_LEDGERS);
         emit_pool_fee_updated(&env, outcome_a, outcome_b, old_fee_bps, fee_bps);
     }
 
@@ -522,7 +531,7 @@ impl LiquidityContract {
         env.storage()
             .persistent()
             .get(&Self::pool_metadata_key(outcome_a, outcome_b))
-            .expect("pool metadata not found")
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound))
     }
 
     /// Get the LP token balance for a provider in a specific pool.
@@ -545,7 +554,9 @@ impl LiquidityContract {
     }
 
     fn require_governor(env: &Env, caller: &Address) {
-        assert!(caller == &Self::governor(env.clone()), "only governor");
+        if caller != &Self::governor(env.clone()) {
+            env.panic_with_error(LiquidityError::NotGovernor);
+        }
     }
 
     fn pool_key(outcome_a: u32, outcome_b: u32) -> DataKey {
