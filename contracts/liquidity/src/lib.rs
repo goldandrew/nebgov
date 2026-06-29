@@ -79,18 +79,8 @@ pub enum LiquidityError {
     InsufficientReserves = 6,
     /// Input and output outcomes must be different.
     SameOutcome = 7,
-    /// Deposit/removal would leave pool below minimum liquidity threshold.
-    BelowMinLiquidity = 8,
-    /// Pool or position has already been initialized.
-    AlreadyInitialized = 9,
-    /// Fee exceeds maximum allowed basis points.
-    FeeTooHigh = 10,
-    /// Swap output is below the caller's minimum accepted amount.
-    SlippageExceeded = 11,
-    /// Only the configured governor may perform this action.
-    NotGovernor = 12,
-    /// Deposit would mint zero LP tokens.
-    DepositTooSmall = 13,
+    /// LP tokens minted are below the caller's minimum.
+    SlippageExceeded = 8,
 }
 
 #[contract]
@@ -127,14 +117,21 @@ impl LiquidityContract {
         caller.require_auth();
         Self::require_governor(&env, &caller);
 
-        let tokens_key = DataKey::PoolTokens(outcome_a, outcome_b);
+        // Normalize outcome ordering so Pool(a,b) and Pool(b,a) map to the same slot.
+        // token_lo is the token for the smaller outcome id, token_hi for the larger.
+        let (lo, hi, tok_lo, tok_hi) = if outcome_a <= outcome_b {
+            (outcome_a, outcome_b, token_a, token_b)
+        } else {
+            (outcome_b, outcome_a, token_b, token_a)
+        };
+
+        let tokens_key = DataKey::PoolTokens(lo, hi);
         if env.storage().persistent().has(&tokens_key) {
             env.panic_with_error(LiquidityError::AlreadyInitialized);
         }
         env.storage()
             .persistent()
-            .set(&tokens_key, &(token_a, token_b));
-        env.storage().persistent().extend_ttl(&tokens_key, TTL_LEDGERS, TTL_LEDGERS);
+            .set(&tokens_key, &(tok_lo, tok_hi));
     }
 
     /// Initialize an explicitly approved pool with its starting fee.
@@ -195,6 +192,7 @@ impl LiquidityContract {
         outcome_b: u32,
         amount_a: i128,
         amount_b: i128,
+        min_lp_tokens_out: i128,
     ) -> (i128, i128) {
         provider.require_auth();
 
@@ -202,23 +200,32 @@ impl LiquidityContract {
             env.panic_with_error(LiquidityError::InvalidAmount);
         }
 
-        if amount_a < MIN_LIQUIDITY {
-            env.panic_with_error(LiquidityError::BelowMinLiquidity);
+        // Normalize outcome pair so Pool(a,b) and Pool(b,a) share the same storage slot.
+        // lo_amount is the deposit for the smaller outcome id (→ reserve_a),
+        // hi_amount is the deposit for the larger outcome id (→ reserve_b).
+        let swapped = outcome_a > outcome_b;
+        let (lo, hi, lo_amount, hi_amount) = if !swapped {
+            (outcome_a, outcome_b, amount_a, amount_b)
+        } else {
+            (outcome_b, outcome_a, amount_b, amount_a)
+        };
+
+        if lo_amount < MIN_LIQUIDITY {
+            panic!("below minimum liquidity");
         }
 
         // Checks & Reads
-        let tokens_key = DataKey::PoolTokens(outcome_a, outcome_b);
+        let tokens_key = DataKey::PoolTokens(lo, hi);
         let stored_tokens: Option<(Address, Address)> = env.storage().persistent().get(&tokens_key);
-        let (token_a, token_b) = stored_tokens
-            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
+        let (token_lo, token_hi) = stored_tokens.expect("pool not registered");
 
-        let pool_key = Self::pool_key(outcome_a, outcome_b);
+        let pool_key = Self::pool_key(lo, hi);
         let mut pool: Pool = env
             .storage()
             .persistent()
             .get(&pool_key)
-            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
-        let position_key = Self::position_key(provider.clone(), outcome_a, outcome_b);
+            .expect("pool not initialized");
+        let position_key = Self::position_key(provider.clone(), lo, hi);
         let mut position: LPPosition = env
             .storage()
             .persistent()
@@ -226,35 +233,39 @@ impl LiquidityContract {
             .unwrap_or(LPPosition { lp_tokens: 0 });
 
         // For subsequent deposits, enforce the current reserve ratio so that
-        // callers cannot shift the pool price by providing an arbitrary amount_b.
-        // `required_b` is the exact amount_b that keeps reserve_b/reserve_a constant.
-        // `amount_b` acts as a caller-supplied maximum (slippage guard): if the pool
-        // has moved so that required_b exceeds amount_b, the call is rejected.
-        // Only `required_b` is credited to the pool regardless of how large amount_b is,
+        // callers cannot shift the pool price by providing an arbitrary hi_amount.
+        // `required_hi` is the exact hi-side amount that keeps reserve_b/reserve_a constant.
+        // `hi_amount` acts as a caller-supplied maximum (slippage guard): if the pool
+        // has moved so that required_hi exceeds hi_amount, the call is rejected.
+        // Only `required_hi` is credited to the pool regardless of how large hi_amount is,
         // preventing value extraction through inflated reserve_b contributions.
-        let (lp_tokens, deposit_b) = if pool.total_lp_supply == 0 {
-            if amount_b < MIN_LIQUIDITY {
-                env.panic_with_error(LiquidityError::BelowMinLiquidity);
+        let (lp_tokens, deposit_hi) = if pool.total_lp_supply == 0 {
+            if hi_amount < MIN_LIQUIDITY {
+                panic!("below minimum liquidity");
             }
-            (amount_a, amount_b)
+            (lo_amount, hi_amount)
         } else {
-            let required_b = Self::checked_mul(&env, amount_a, pool.reserve_b) / pool.reserve_a;
-            if required_b < MIN_LIQUIDITY {
-                env.panic_with_error(LiquidityError::BelowMinLiquidity);
+            let required_hi = Self::checked_mul(&env, lo_amount, pool.reserve_b) / pool.reserve_a;
+            if required_hi < MIN_LIQUIDITY {
+                panic!("below minimum liquidity");
             }
-            if amount_b < required_b {
-                env.panic_with_error(LiquidityError::ImbalancedDeposit);
+            if hi_amount < required_hi {
+                panic!("imbalanced deposit: amount_b below required ratio");
             }
-            let lp = Self::checked_mul(&env, amount_a, pool.total_lp_supply) / pool.reserve_a;
+            let lp = Self::checked_mul(&env, lo_amount, pool.total_lp_supply) / pool.reserve_a;
             if lp == 0 {
                 env.panic_with_error(LiquidityError::DepositTooSmall);
             }
-            (lp, required_b)
+            (lp, required_hi)
         };
 
+        if lp_tokens < min_lp_tokens_out {
+            env.panic_with_error(LiquidityError::SlippageExceeded);
+        }
+
         // Effects
-        pool.reserve_a = Self::checked_add(&env, pool.reserve_a, amount_a);
-        pool.reserve_b = Self::checked_add(&env, pool.reserve_b, deposit_b);
+        pool.reserve_a = Self::checked_add(&env, pool.reserve_a, lo_amount);
+        pool.reserve_b = Self::checked_add(&env, pool.reserve_b, deposit_hi);
         pool.total_lp_supply = Self::checked_add(&env, pool.total_lp_supply, lp_tokens);
         position.lp_tokens = Self::checked_add(&env, position.lp_tokens, lp_tokens);
 
@@ -264,20 +275,24 @@ impl LiquidityContract {
         env.storage().persistent().extend_ttl(&position_key, TTL_LEDGERS, TTL_LEDGERS);
 
         // Interactions
-        TokenClient::new(&env, &token_a).transfer(
+        TokenClient::new(&env, &token_lo).transfer(
             &provider,
             &env.current_contract_address(),
-            &amount_a,
+            &lo_amount,
         );
-        TokenClient::new(&env, &token_b).transfer(
+        TokenClient::new(&env, &token_hi).transfer(
             &provider,
             &env.current_contract_address(),
-            &deposit_b,
+            &deposit_hi,
         );
 
-        emit_liquidity_added(&env, &provider, outcome_a, outcome_b, amount_a, deposit_b, lp_tokens);
+        emit_liquidity_added(&env, &provider, lo, hi, lo_amount, deposit_hi, lp_tokens);
 
-        (lp_tokens, deposit_b)
+        // Return (lp_tokens, deposit for the caller's "b" side).
+        // When the pair is not swapped, caller's b = hi → deposit_hi.
+        // When swapped, caller's b = lo → lo_amount (lo side is always fully consumed).
+        let deposit_b_caller = if !swapped { deposit_hi } else { lo_amount };
+        (lp_tokens, deposit_b_caller)
     }
 
     /// Remove liquidity from a pool and burn LP shares.
@@ -302,41 +317,48 @@ impl LiquidityContract {
             env.panic_with_error(LiquidityError::InsufficientShares);
         }
 
+        // Normalize outcome pair so Pool(a,b) and Pool(b,a) share the same storage slot.
+        let swapped = outcome_a > outcome_b;
+        let (lo, hi) = if !swapped {
+            (outcome_a, outcome_b)
+        } else {
+            (outcome_b, outcome_a)
+        };
+
         // Checks & Reads
-        let pool_key = Self::pool_key(outcome_a, outcome_b);
+        let pool_key = Self::pool_key(lo, hi);
         let mut pool: Pool = env
             .storage()
             .persistent()
             .get(&pool_key)
             .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
 
-        let position_key = Self::position_key(provider.clone(), outcome_a, outcome_b);
+        let position_key = Self::position_key(provider.clone(), lo, hi);
         let mut position: LPPosition = env
             .storage()
             .persistent()
             .get(&position_key)
             .unwrap_or_else(|| env.panic_with_error(LiquidityError::InsufficientShares));
 
-        let tokens_key = DataKey::PoolTokens(outcome_a, outcome_b);
+        let tokens_key = DataKey::PoolTokens(lo, hi);
         let stored_tokens: Option<(Address, Address)> = env.storage().persistent().get(&tokens_key);
-        let (token_a, token_b) = stored_tokens
-            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
+        let (token_lo, token_hi) = stored_tokens.expect("pool tokens not found");
 
-        let amount_a = (lp_tokens * pool.reserve_a) / pool.total_lp_supply;
-        let amount_b = (lp_tokens * pool.reserve_b) / pool.total_lp_supply;
+        let amount_lo = (lp_tokens * pool.reserve_a) / pool.total_lp_supply;
+        let amount_hi = (lp_tokens * pool.reserve_b) / pool.total_lp_supply;
 
         // Ensure post-removal reserves don't drop below MIN_LIQUIDITY unless fully drained
-        let remaining_a = pool.reserve_a - amount_a;
-        let remaining_b = pool.reserve_b - amount_b;
-        if (remaining_a > 0 && remaining_a < MIN_LIQUIDITY)
-            || (remaining_b > 0 && remaining_b < MIN_LIQUIDITY)
+        let remaining_lo = pool.reserve_a - amount_lo;
+        let remaining_hi = pool.reserve_b - amount_hi;
+        if (remaining_lo > 0 && remaining_lo < MIN_LIQUIDITY)
+            || (remaining_hi > 0 && remaining_hi < MIN_LIQUIDITY)
         {
             env.panic_with_error(LiquidityError::BelowMinLiquidity);
         }
 
         // Effects
-        pool.reserve_a -= amount_a;
-        pool.reserve_b -= amount_b;
+        pool.reserve_a -= amount_lo;
+        pool.reserve_b -= amount_hi;
         pool.total_lp_supply -= lp_tokens;
         position.lp_tokens -= lp_tokens;
 
@@ -346,20 +368,25 @@ impl LiquidityContract {
         env.storage().persistent().extend_ttl(&position_key, TTL_LEDGERS, TTL_LEDGERS);
 
         // Interactions
-        TokenClient::new(&env, &token_a).transfer(
+        TokenClient::new(&env, &token_lo).transfer(
             &env.current_contract_address(),
             &provider,
-            &amount_a,
+            &amount_lo,
         );
-        TokenClient::new(&env, &token_b).transfer(
+        TokenClient::new(&env, &token_hi).transfer(
             &env.current_contract_address(),
             &provider,
-            &amount_b,
+            &amount_hi,
         );
 
-        emit_liquidity_removed(&env, &provider, outcome_a, outcome_b, amount_a, amount_b, lp_tokens);
+        emit_liquidity_removed(&env, &provider, lo, hi, amount_lo, amount_hi, lp_tokens);
 
-        (amount_a, amount_b)
+        // Return amounts in the caller's original ordering.
+        if !swapped {
+            (amount_lo, amount_hi)
+        } else {
+            (amount_hi, amount_lo)
+        }
     }
 
     /// Swap `amount_in` of one pool asset for the other.
@@ -381,8 +408,17 @@ impl LiquidityContract {
             env.panic_with_error(LiquidityError::InvalidAmount);
         }
 
+        // Normalize outcome pair: pool is always stored under Pool(lo, hi).
+        // Determine which reserve is "in" and which is "out" based on direction.
+        let lo_is_in = outcome_in < outcome_out;
+        let (lo, hi) = if lo_is_in {
+            (outcome_in, outcome_out)
+        } else {
+            (outcome_out, outcome_in)
+        };
+
         // Checks & Reads
-        let pool_key = Self::pool_key(outcome_in, outcome_out);
+        let pool_key = Self::pool_key(lo, hi);
         let mut pool: Pool = env
             .storage()
             .persistent()
@@ -393,12 +429,20 @@ impl LiquidityContract {
             env.panic_with_error(LiquidityError::InsufficientReserves);
         }
 
-        let tokens_key = DataKey::PoolTokens(outcome_in, outcome_out);
+        // PoolTokens(lo, hi) stores (token_lo, token_hi).
+        let tokens_key = DataKey::PoolTokens(lo, hi);
         let stored_tokens: Option<(Address, Address)> = env.storage().persistent().get(&tokens_key);
-        let (token_in, token_out) = stored_tokens
-            .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound));
+        let (token_lo, token_hi) = stored_tokens.expect("pool tokens not found");
 
-        let amount_out = (amount_in * pool.reserve_b) / (pool.reserve_a + amount_in);
+        // If outcome_in is lo, we sell into reserve_a and receive from reserve_b,
+        // and vice versa for the reverse direction.
+        let (reserve_in, reserve_out, token_in, token_out) = if lo_is_in {
+            (pool.reserve_a, pool.reserve_b, token_lo, token_hi)
+        } else {
+            (pool.reserve_b, pool.reserve_a, token_hi, token_lo)
+        };
+
+        let amount_out = (amount_in * reserve_out) / (reserve_in + amount_in);
         let fee = (amount_out * pool.fee_bps as i128) / 10_000;
         let amount_out_with_fee = amount_out - fee;
 
@@ -406,9 +450,14 @@ impl LiquidityContract {
             env.panic_with_error(LiquidityError::SlippageExceeded);
         }
 
-        // Effects
-        pool.reserve_a += amount_in;
-        pool.reserve_b -= amount_out_with_fee;
+        // Effects: update the correct reserves based on direction.
+        if lo_is_in {
+            pool.reserve_a += amount_in;
+            pool.reserve_b -= amount_out_with_fee;
+        } else {
+            pool.reserve_b += amount_in;
+            pool.reserve_a -= amount_out_with_fee;
+        }
         env.storage().persistent().set(&pool_key, &pool);
         env.storage().persistent().extend_ttl(&pool_key, TTL_LEDGERS, TTL_LEDGERS);
 
@@ -465,6 +514,18 @@ impl LiquidityContract {
             .unwrap_or_else(|| env.panic_with_error(LiquidityError::PoolNotFound))
     }
 
+    /// Get the current pool state without panicking if the pool does not exist.
+    ///
+    /// Returns `Some(Pool)` if a pool for the given outcome pair has been
+    /// created, or `None` otherwise. Use this to check pool existence before
+    /// attempting operations like `add_liquidity` or `swap`, which require an
+    /// already-initialized pool.
+    pub fn get_pool_safe(env: Env, outcome_a: u32, outcome_b: u32) -> Option<Pool> {
+        env.storage()
+            .persistent()
+            .get(&Self::pool_key(outcome_a, outcome_b))
+    }
+
     /// Get immutable metadata recorded when the pool was initialized.
     pub fn get_pool_metadata(env: Env, outcome_a: u32, outcome_b: u32) -> PoolMetadata {
         env.storage()
@@ -499,15 +560,30 @@ impl LiquidityContract {
     }
 
     fn pool_key(outcome_a: u32, outcome_b: u32) -> DataKey {
-        DataKey::Pool(outcome_a, outcome_b)
+        let (lo, hi) = if outcome_a <= outcome_b {
+            (outcome_a, outcome_b)
+        } else {
+            (outcome_b, outcome_a)
+        };
+        DataKey::Pool(lo, hi)
     }
 
     fn pool_metadata_key(outcome_a: u32, outcome_b: u32) -> DataKey {
-        DataKey::PoolMetadata(outcome_a, outcome_b)
+        let (lo, hi) = if outcome_a <= outcome_b {
+            (outcome_a, outcome_b)
+        } else {
+            (outcome_b, outcome_a)
+        };
+        DataKey::PoolMetadata(lo, hi)
     }
 
     fn position_key(provider: Address, outcome_a: u32, outcome_b: u32) -> DataKey {
-        DataKey::Position(provider, outcome_a, outcome_b)
+        let (lo, hi) = if outcome_a <= outcome_b {
+            (outcome_a, outcome_b)
+        } else {
+            (outcome_b, outcome_a)
+        };
+        DataKey::Position(provider, lo, hi)
     }
 
     fn checked_add(env: &Env, lhs: i128, rhs: i128) -> i128 {

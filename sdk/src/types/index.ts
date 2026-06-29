@@ -325,6 +325,29 @@ export interface SpendingCap {
   periodLedgers: number;
 }
 
+export interface LiquidityConfig {
+  /** Contract address of the liquidity pool contract */
+  liquidityAddress: string;
+  /** Stellar network to connect to */
+  network: Network;
+  /** RPC URL override (optional — defaults to public horizon) */
+  rpcUrl?: string;
+  /** Optional funded classic account used for read-only simulation calls. */
+  simulationAccount?: string;
+  /** Maximum retry attempts for failed operations (default: 3) */
+  maxAttempts?: number;
+  /** Base delay between retries in milliseconds (default: 1000) */
+  baseDelayMs?: number;
+}
+
+/** On-chain state of a single two-asset liquidity pool. */
+export interface Pool {
+  reserveA: bigint;
+  reserveB: bigint;
+  totalLpSupply: bigint;
+  feeBps: number;
+}
+
 /** A treasury batch transfer event as returned by the indexer. */
 export interface BatchTransferEvent {
   /** SHA-256 operation hash (hex-encoded) */
