@@ -304,6 +304,15 @@ export class GovernorClient {
         );
       }
 
+      // Validate description length to prevent DoS via large payloads
+      const MAX_DESCRIPTION_LENGTH = 10000;
+      if (description.length > MAX_DESCRIPTION_LENGTH) {
+        throw new GovernorError(
+          GovernorErrorCode.InvalidArguments,
+          `Description exceeds maximum length of ${MAX_DESCRIPTION_LENGTH} characters (got ${description.length})`,
+        );
+      }
+
       // Validate descriptionHash matches SHA-256(description) to prevent
       // unverifiable proposals from accidental hash/description mismatch.
       // Skip for legacy calls where the hash is a zeroed placeholder.
@@ -381,6 +390,14 @@ export class GovernorClient {
     }
     if (targets.length === 0) {
       throw new Error("At least one on-chain action is required");
+    }
+
+    // Validate description length to prevent DoS via large payloads
+    const MAX_DESCRIPTION_LENGTH = 10000;
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new Error(
+        `Description exceeds maximum length of ${MAX_DESCRIPTION_LENGTH} characters (got ${description.length})`,
+      );
     }
 
     const hashBytes = hexToBytes32(descriptionHash);
@@ -1284,7 +1301,6 @@ export class GovernorClient {
 
   /**
    * Get the current state of a proposal.
-   * TODO issue #17: decode all 7 ProposalState variants.
    */
   async getProposalState(proposalId: bigint): Promise<ProposalState> {
     return this.retry(async () => {
@@ -1335,8 +1351,6 @@ export class GovernorClient {
       Cancelled: ProposalState.Cancelled,
       Expired: ProposalState.Expired,
     };
-
-    // DEBUG: throw info
 
     if (variant in states) {
       return states[variant];

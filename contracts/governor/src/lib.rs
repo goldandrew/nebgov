@@ -1479,6 +1479,11 @@ impl GovernorContract {
         }
 
         events::emit_proposal_cancelled(&env, proposal_id, &caller);
+        // Emit ProposalCancelledFromQueue event for veto cancellation tracking
+        env.events().publish(
+            (Symbol::new(&env, "ProposalCancelledFromQueue"),),
+            (proposal_id, &caller),
+        );
     }
 
     /// Get the current state of a proposal.
