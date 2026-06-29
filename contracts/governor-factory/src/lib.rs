@@ -170,7 +170,11 @@ impl GovernorFactoryContract {
         if voting_period == 0 {
             env.panic_with_error(FactoryError::InvalidVotingPeriod);
         }
-        if quorum_numerator == 0 {
+        // quorum_numerator == 0 is intentionally valid: the governor contract handles it
+        // by returning 0 (any positive vote count satisfies quorum), useful for signaling
+        // protocols and prediction markets. Only reject values above 100 (the governor's
+        // own validate_settings ceiling).
+        if quorum_numerator > 100 {
             env.panic_with_error(FactoryError::InvalidQuorumNumerator);
         }
         if timelock_delay == 0 {

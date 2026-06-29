@@ -75,6 +75,7 @@ See [docs/architecture.md](./docs/architecture.md) for the full design overview.
 - [docs/parameter-guide.md](./docs/parameter-guide.md) — safe governance parameter ranges and preset configurations
 - [docs/security.md](./docs/security.md) — treasury reentrancy analysis and contract security notes
 - [docs/deployments.md](./docs/deployments.md) — official contract addresses for all networks
+- [docs/troubleshooting.md](./docs/troubleshooting.md) — RPC, wallet, transaction, and contract error reference
 
 ```
 propose() → Governor → [voting period] → queue() → Timelock → execute()

@@ -980,3 +980,73 @@ fn test_constant_product_invariant_small_swap() {
 
     assert!(k_after >= k_before, "k decreased on small swap: {} < {}", k_after, k_before);
 }
+
+// ============================================================================
+// TESTS FOR CANONICAL POOL KEY ORDERING (Issue #589)
+// ============================================================================
+
+#[test]
+fn test_swap_reverse_direction_finds_pool() {
+    // Pool created with (outcome_a=2, outcome_b=1). A swap submitted as
+    // (outcome_in=1, outcome_out=2) must succeed — it is the reverse direction
+    // against the same pool, not a missing pool.
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    // Create pool with reversed ordering (hi, lo)
+    setup_pool(&client, &governor, 2, 1, &token_b, &token_a);
+    // Add liquidity using the same reversed ordering
+    client.add_liquidity(&provider, &2, &1, &10_000, &10_000);
+
+    // Swap in the forward direction (lo → hi) against the pool stored as (1, 2)
+    let amount_out = client.swap(&trader, &1, &2, &1_000, &0);
+    assert!(amount_out > 0, "reverse-direction swap should succeed and return tokens");
+
+    let pool = client.get_pool(&1, &2);
+    assert!(pool.reserve_a > 10_000, "reserve_a (outcome 1) should increase after swap in");
+    assert!(pool.reserve_b < 10_000, "reserve_b (outcome 2) should decrease after swap out");
+}
+
+#[test]
+fn test_swap_both_directions_share_same_pool() {
+    // Swapping A→B and then B→A should both operate on the single canonical pool,
+    // not on two separate storage slots.
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &100_000, &100_000);
+
+    // Swap 0 → 1
+    let out_1 = client.swap(&trader, &0, &1, &1_000, &0);
+    assert!(out_1 > 0);
+
+    // Swap 1 → 0 (reverse direction, same pool)
+    let out_2 = client.swap(&trader, &1, &0, &1_000, &0);
+    assert!(out_2 > 0, "reverse-direction swap must succeed on the same pool");
+
+    // Both swaps affect the same pool; reserves must reflect two trades.
+    let pool = client.get_pool(&0, &1);
+    // After (0→1): reserve_a grew, reserve_b shrank.
+    // After (1→0): reserve_b grew, reserve_a shrank.
+    // Net: the pool should still satisfy k ≥ original k.
+    let k = pool.reserve_a * pool.reserve_b;
+    assert!(k >= 100_000 * 100_000, "k must not decrease after two opposing swaps");
+}
+
+#[test]
+fn test_pool_key_canonical_ordering_lookup() {
+    // get_pool with either (a,b) or (b,a) ordering must return the same pool.
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 3, 5, &token_a, &token_b);
+    client.add_liquidity(&provider, &3, &5, &10_000, &20_000);
+
+    let pool_35 = client.get_pool(&3, &5);
+    let pool_53 = client.get_pool(&5, &3);
+
+    assert_eq!(pool_35.reserve_a, pool_53.reserve_a);
+    assert_eq!(pool_35.reserve_b, pool_53.reserve_b);
+    assert_eq!(pool_35.total_lp_supply, pool_53.total_lp_supply);
+}
