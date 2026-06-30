@@ -13,6 +13,7 @@ pub const PROPOSAL_CANCELLED_TOPIC: &str = "ProposalCancelled";
 pub const PROPOSAL_EXPIRED_TOPIC: &str = "ProposalExpired";
 pub const GOVERNOR_UPGRADED_TOPIC: &str = "GovernorUpgraded";
 pub const CONFIG_UPDATED_TOPIC: &str = "ConfigUpdated";
+pub const GUARDIAN_CHANGED_TOPIC: &str = "GuardianChanged";
 
 #[derive(Clone)]
 #[soroban_sdk::contracttype]
@@ -89,6 +90,13 @@ pub struct GovernorUpgradedEvent {
 pub struct ConfigUpdatedEvent {
     pub old_settings: GovernorSettings,
     pub new_settings: GovernorSettings,
+}
+
+#[derive(Clone)]
+#[soroban_sdk::contracttype]
+pub struct GuardianChangedEvent {
+    pub old_guardian: Address,
+    pub new_guardian: Address,
 }
 
 #[derive(Clone)]
@@ -236,6 +244,16 @@ pub fn emit_config_updated(
     );
 }
 
+pub fn emit_guardian_changed(env: &Env, old_guardian: &Address, new_guardian: &Address) {
+    env.events().publish(
+        (Symbol::new(env, GUARDIAN_CHANGED_TOPIC),),
+        GuardianChangedEvent {
+            old_guardian: old_guardian.clone(),
+            new_guardian: new_guardian.clone(),
+        },
+    );
+}
+
 pub fn emit_paused(env: &Env, pauser: &Address) {
     env.events().publish(
         (Symbol::new(env, PAUSED_TOPIC), pauser.clone()),
@@ -252,5 +270,12 @@ pub fn emit_unpaused(env: &Env) {
         UnpauseEvent {
             ledger: env.ledger().sequence(),
         },
+    );
+}
+
+pub fn emit_pauser_changed(env: &Env, old_pauser: &Address, new_pauser: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "PauserChanged"),),
+        (old_pauser.clone(), new_pauser.clone()),
     );
 }

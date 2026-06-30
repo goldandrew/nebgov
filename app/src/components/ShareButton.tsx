@@ -8,7 +8,7 @@ export function ShareButton({ url, title }: { url: string; title?: string }) {
       const nav = typeof navigator !== "undefined" ? navigator : null;
 
       if (nav && "share" in nav) {
-        await (nav as Navigator & { share(data?: object): Promise<void> }).share({ url, title });
+        await (nav as any).share({ url, title });
         return;
       }
 

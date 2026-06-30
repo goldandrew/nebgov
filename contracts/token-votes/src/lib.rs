@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Symbol,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Symbol, Vec,
 };
 
 #[cfg(test)]
@@ -54,9 +54,13 @@ impl TokenVotesContract {
             .instance()
             .set(&DataKey::CheckpointRetentionPeriod, &100800u32);
         // Default time-weighting to disabled
-        env.storage().instance().set(&DataKey::TimeWeightEnabled, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightEnabled, &false);
         // Default scale to 4,204,800 (~1 year at 7.5s per ledger)
-        env.storage().instance().set(&DataKey::TimeWeightScale, &4204800u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightScale, &4204800u32);
     }
 
     /// Delegate voting power from caller to delegatee.
@@ -69,6 +73,34 @@ impl TokenVotesContract {
     pub fn delegate(env: Env, delegator: Address, delegatee: Address) {
         delegator.require_auth();
         Self::apply_delegation(&env, delegator, delegatee);
+    }
+
+    /// Bulk-delegate voting power to multiple delegatees in a single transaction.
+    ///
+    /// In a MultiToken governance setup there are multiple token-votes contracts,
+    /// one per token type.  A token holder can delegate their voting power for
+    /// all of them with a single on-chain auth signature by calling
+    /// `delegate_batch` on each contract within the same transaction.
+    ///
+    /// Each element of `delegatees` is applied in order via [`apply_delegation`].
+    /// Because each call overwrites the previous delegate, the *last* entry in
+    /// the list is the effective delegatee for this contract after the batch
+    /// completes.  When coordinating across multiple token-votes contracts, the
+    /// governor's multi-token strategy passes a single-element list whose sole
+    /// entry is the delegatee for that particular token.
+    ///
+    /// A single auth on `delegator` covers all delegations in the batch — this
+    /// is the key UX improvement over N separate `delegate()` calls.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `delegatees` is empty.
+    pub fn delegate_batch(env: Env, delegator: Address, delegatees: Vec<Address>) {
+        assert!(!delegatees.is_empty(), "delegatees must not be empty");
+        delegator.require_auth();
+        for delegatee in delegatees.iter() {
+            Self::apply_delegation(&env, delegator.clone(), delegatee);
+        }
     }
 
     /// Explicitly revoke delegation and move voting power back to self.
@@ -136,8 +168,10 @@ impl TokenVotesContract {
         new_record.balance = balance;
 
         if balance > record.balance {
-            // Balance increased: average in the new tokens at current ledger
             let added = balance - record.balance;
+            // When record.balance == 0 (first delegation), this simplifies to:
+            //   total_weighted_start = balance * current_ledger
+            //   start_ledger = current_ledger  (correct for new delegators)
             let total_weighted_start =
                 (record.balance * record.start_ledger as i128) + (added * current_ledger as i128);
             new_record.start_ledger = if balance > 0 {
@@ -145,8 +179,6 @@ impl TokenVotesContract {
             } else {
                 current_ledger
             };
-        } else if record.balance == 0 && balance > 0 {
-            new_record.start_ledger = current_ledger;
         }
         // If balance decreased or stayed same, record.start_ledger is preserved.
 
@@ -155,8 +187,18 @@ impl TokenVotesContract {
 
         if let Some(old_delegatee) = previous_delegate.clone() {
             if old_delegatee != delegatee {
-                Self::update_account_votes(env, old_delegatee.clone(), -record.balance, -old_weighted_sum);
-                Self::update_account_votes(env, delegatee.clone(), new_record.balance, new_weighted_sum);
+                Self::update_account_votes(
+                    env,
+                    old_delegatee.clone(),
+                    -record.balance,
+                    -old_weighted_sum,
+                );
+                Self::update_account_votes(
+                    env,
+                    delegatee.clone(),
+                    new_record.balance,
+                    new_weighted_sum,
+                );
             } else {
                 let delta = new_record.balance - record.balance;
                 let delta_ws = new_weighted_sum - old_weighted_sum;
@@ -208,7 +250,12 @@ impl TokenVotesContract {
             let weighted_sum = record.balance * record.start_ledger as i128;
             if record.balance > 0 {
                 // Remove voting power from the previous delegate and total supply.
-                Self::update_account_votes(&env, old_delegatee.clone(), -record.balance, -weighted_sum);
+                Self::update_account_votes(
+                    &env,
+                    old_delegatee.clone(),
+                    -record.balance,
+                    -weighted_sum,
+                );
                 Self::update_total_supply_checkpoint(&env, -record.balance, -weighted_sum);
             }
 
@@ -293,12 +340,15 @@ impl TokenVotesContract {
     /// Get voting power at a past ledger sequence (snapshot).
     pub fn get_past_votes(env: Env, account: Address, ledger: u32) -> i128 {
         let current_ledger = env.ledger().sequence();
-        assert!(ledger <= current_ledger, "ledger must not exceed current ledger");
+        assert!(
+            ledger <= current_ledger,
+            "ledger must not exceed current ledger"
+        );
 
         let checkpoints: soroban_sdk::Vec<Checkpoint> = env
             .storage()
             .persistent()
-            .get(&DataKey::Checkpoints(account))
+            .get(&DataKey::Checkpoints(account.clone()))
             .unwrap_or(soroban_sdk::Vec::new(&env));
 
         let cp = Self::binary_search(&checkpoints, ledger);
@@ -337,7 +387,7 @@ impl TokenVotesContract {
             .persistent()
             .get(&DataKey::TotalCheckpoints)
             .unwrap_or(soroban_sdk::Vec::new(&env));
-        
+
         let cp = Self::binary_search(&checkpoints, ledger);
         if cp.votes <= 0 {
             return 0;
@@ -361,7 +411,7 @@ impl TokenVotesContract {
             .unwrap_or(soroban_sdk::Vec::new(&env));
 
         let current_ledger = env.ledger().sequence();
-        
+
         // When using raw checkpoint manually, we assume no weighted sum change for simplicity
         // or we try to estimate it based on last checkpoint.
         let weighted_sum = if checkpoints.is_empty() {
@@ -404,7 +454,7 @@ impl TokenVotesContract {
             .persistent()
             .get(&DataKey::TotalCheckpoints)
             .unwrap_or(soroban_sdk::Vec::new(env));
- 
+
         let current_ledger = env.ledger().sequence();
         let (old_votes, old_weighted_sum) = if checkpoints.is_empty() {
             (0, 0)
@@ -414,7 +464,7 @@ impl TokenVotesContract {
         };
         let new_total = old_votes + delta;
         let new_weighted_sum = old_weighted_sum + delta_weighted_sum;
- 
+
         if !checkpoints.is_empty() && checkpoints.last().unwrap().ledger == current_ledger {
             let last_idx = checkpoints.len() - 1;
             checkpoints.set(
@@ -432,7 +482,7 @@ impl TokenVotesContract {
                 weighted_sum: new_weighted_sum,
             });
         }
- 
+
         env.storage()
             .persistent()
             .set(&DataKey::TotalCheckpoints, &checkpoints);
@@ -662,7 +712,9 @@ impl TokenVotesContract {
             .expect("not initialized");
         admin.require_auth();
 
-        env.storage().instance().set(&DataKey::TimeWeightEnabled, &enabled);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightEnabled, &enabled);
     }
 
     /// Get whether time-weighted voting is enabled.
@@ -1802,6 +1854,104 @@ mod tests {
         assert_eq!(client.get_votes(&delegatee2), 300);
     }
 
+    #[test]
+    fn test_new_delegator_start_ledger_is_current_ledger() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        let (contract_id, token_addr) = setup(&env, &admin);
+        let client = TokenVotesContractClient::new(&env, &contract_id);
+        let sac_client = token::StellarAssetClient::new(&env, &token_addr);
+
+        sac_client.mint(&delegator, &100i128);
+
+        env.ledger().with_mut(|l| l.sequence_number = 42);
+
+        client.delegate(&delegator, &delegatee);
+
+        let record = client.get_delegator_record(&delegator);
+        assert_eq!(record.start_ledger, 42);
+        assert_eq!(record.balance, 100);
+    }
+
+    // ── delegate_batch tests ─────────────────────────────────────────────────
+
+    /// Single-element batch behaves identically to delegate().
+    #[test]
+    fn test_delegate_batch_single_element() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+
+        let (contract_id, token_addr) = setup(&env, &admin);
+        let client = TokenVotesContractClient::new(&env, &contract_id);
+        let sac_client = token::StellarAssetClient::new(&env, &token_addr);
+
+        sac_client.mint(&delegator, &500i128);
+
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(delegatee.clone());
+        client.delegate_batch(&delegator, &batch);
+
+        assert_eq!(client.get_votes(&delegatee), 500);
+        assert_eq!(client.delegates(&delegator), Some(delegatee));
+    }
+
+    /// Multi-element batch: the last delegatee in the list is the effective one.
+    #[test]
+    fn test_delegate_batch_last_entry_wins() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let delegator = Address::generate(&env);
+        let delegatee_a = Address::generate(&env);
+        let delegatee_b = Address::generate(&env);
+        let delegatee_c = Address::generate(&env);
+
+        let (contract_id, token_addr) = setup(&env, &admin);
+        let client = TokenVotesContractClient::new(&env, &contract_id);
+        let sac_client = token::StellarAssetClient::new(&env, &token_addr);
+
+        sac_client.mint(&delegator, &200i128);
+
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(delegatee_a.clone());
+        batch.push_back(delegatee_b.clone());
+        batch.push_back(delegatee_c.clone());
+        client.delegate_batch(&delegator, &batch);
+
+        // Final delegatee is delegatee_c.
+        assert_eq!(client.delegates(&delegator), Some(delegatee_c.clone()));
+        assert_eq!(client.get_votes(&delegatee_c), 200);
+        // Intermediate delegatees received and then lost voting power.
+        assert_eq!(client.get_votes(&delegatee_a), 0);
+        assert_eq!(client.get_votes(&delegatee_b), 0);
+    }
+
+    /// Empty batch panics.
+    #[test]
+    #[should_panic]
+    fn test_delegate_batch_empty_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let delegator = Address::generate(&env);
+
+        let (contract_id, _) = setup(&env, &admin);
+        let client = TokenVotesContractClient::new(&env, &contract_id);
+
+        let empty: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        client.delegate_batch(&delegator, &empty);
+    }
 }
 
 #[cfg(test)]

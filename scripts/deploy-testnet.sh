@@ -38,7 +38,14 @@ if [[ -f "$ENV_FILE" ]]; then
   source "$ENV_FILE"
   set +a
 else
-  if [[ -f "$ROOT_DIR/.env.example" ]]; then
+  if [[ -f "$ROOT_DIR/.env.testnet.example" ]]; then
+    info "No $ENV_FILE found — copying from .env.testnet.example"
+    cp "$ROOT_DIR/.env.testnet.example" "$ENV_FILE"
+    set -a
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    set +a
+  elif [[ -f "$ROOT_DIR/.env.example" ]]; then
     info "No $ENV_FILE found — copying from .env.example"
     cp "$ROOT_DIR/.env.example" "$ENV_FILE"
     set -a
@@ -91,13 +98,26 @@ fi
 # ---- Build WASM contracts -------------------------------------------
 WASM_DIR="$ROOT_DIR/target/wasm32v1-none/release"
 
+# Ensure the target is installed so the build doesn't fail with a cryptic error
+if ! rustup target list --installed | grep -q 'wasm32v1-none'; then
+  info "Installing wasm32v1-none target..."
+  rustup target add wasm32v1-none
+fi
+
 info "Building WASM contracts (release) ..."
 cargo build --release --target wasm32v1-none --manifest-path "$ROOT_DIR/Cargo.toml" --workspace
 ok "WASM build complete"
 
 # Verify expected artefacts exist
-for wasm in sorogov_token_votes sorogov_timelock sorogov_governor sorogov_treasury sorogov_governor_factory; do
+for wasm in sorogov_token_votes sorogov_timelock sorogov_governor sorogov_treasury sorogov_governor_factory sorogov_liquidity; do
   [[ -f "$WASM_DIR/${wasm}.wasm" ]] || fail "Expected WASM not found: $WASM_DIR/${wasm}.wasm"
+done
+
+# ---- Optimise WASM binaries -----------------------------------------
+command -v wasm-opt >/dev/null 2>&1 || fail "wasm-opt not found. Install: npm i -g binaryen"
+for wasm in "$WASM_DIR"/*.wasm; do
+  wasm-opt -Oz "$wasm" -o "$wasm"
+  ok "Optimized $(basename "$wasm")"
 done
 
 # ---- Deploy helper --------------------------------------------------
@@ -154,12 +174,16 @@ deploy_contract "$WASM_DIR/sorogov_treasury.wasm" "TREASURY_ADDRESS"
 # 5. Factory
 deploy_contract "$WASM_DIR/sorogov_governor_factory.wasm" "FACTORY_ADDRESS"
 
+# 6. Liquidity
+deploy_contract "$WASM_DIR/sorogov_liquidity.wasm" "LIQUIDITY_ADDRESS"
+
 # ====================================================================
 # Initialize contracts (idempotent — each checks storage internally)
 # ====================================================================
 
-# Resolve the SEP-41 token address. If not provided, use native XLM.
-SEP41_TOKEN="${SEP41_TOKEN_ADDRESS:-CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC}"
+# Resolve token addresses. If no governance token is provided, use native XLM.
+NATIVE_TOKEN="${NATIVE_TOKEN_ADDRESS:-CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC}"
+SEP41_TOKEN="${SEP41_TOKEN_ADDRESS:-$NATIVE_TOKEN}"
 
 # -- Initialize token-votes ------------------------------------------
 info "Initializing token-votes ..."
@@ -176,6 +200,7 @@ stellar contract invoke \
 # -- Initialize timelock (use governor address or deployer as placeholder) -
 TIMELOCK_GOVERNOR="${GOVERNOR_ADDRESS:-$DEPLOYER_ADDR}"
 TIMELOCK_DELAY="${TIMELOCK_MIN_DELAY:-3600}"
+TIMELOCK_WINDOW="${TIMELOCK_EXECUTION_WINDOW:-86400}"
 
 info "Initializing timelock ..."
 stellar contract invoke \
@@ -186,14 +211,21 @@ stellar contract invoke \
   --admin "$DEPLOYER_ADDR" \
   --governor "$TIMELOCK_GOVERNOR" \
   --min_delay "$TIMELOCK_DELAY" \
+  --execution_window "$TIMELOCK_WINDOW" \
   2>/dev/null && ok "timelock initialized" \
   || warn "timelock already initialized (or init failed — check manually)"
+
+# Persist timelock parameters
+persist "TIMELOCK_MIN_DELAY" "$TIMELOCK_DELAY"
+persist "TIMELOCK_EXECUTION_WINDOW" "$TIMELOCK_WINDOW"
 
 # -- Initialize governor ----------------------------------------------
 DELAY="${VOTING_DELAY:-60}"
 PERIOD="${VOTING_PERIOD:-17280}"
 QUORUM="${QUORUM_NUMERATOR:-4}"
 THRESHOLD="${PROPOSAL_THRESHOLD:-100000000}"
+GUARDIAN="${GUARDIAN_ADDRESS:-$DEPLOYER_ADDR}"
+VOTE_TYPE="${VOTE_TYPE:-Extended}"
 
 info "Initializing governor ..."
 stellar contract invoke \
@@ -208,6 +240,8 @@ stellar contract invoke \
   --voting_period "$PERIOD" \
   --quorum_numerator "$QUORUM" \
   --proposal_threshold "$THRESHOLD" \
+  --guardian "$GUARDIAN" \
+  --vote_type "$VOTE_TYPE" \
   2>/dev/null && ok "governor initialized" \
   || warn "governor already initialized (or init failed — check manually)"
 
@@ -257,6 +291,17 @@ stellar contract invoke \
   2>/dev/null && ok "factory initialized" \
   || warn "factory already initialized (or init failed — check manually)"
 
+info "Configuring factory native token preflight ..."
+stellar contract invoke \
+  --id "$FACTORY_ADDRESS" \
+  --source "$IDENTITY" \
+  --network "$NETWORK" \
+  -- set_native_token \
+  --admin "$DEPLOYER_ADDR" \
+  --native_token "$NATIVE_TOKEN" \
+  2>/dev/null && ok "factory native token configured" \
+  || warn "factory native token already configured (or update failed — check manually)"
+
 # ====================================================================
 # Summary
 # ====================================================================
@@ -266,10 +311,14 @@ info "  NebGov testnet deployment complete"
 info "============================================================"
 info "  Deployer ............. $DEPLOYER_ADDR"
 info "  Token-Votes .......... $TOKEN_VOTES_ADDRESS"
+info "  Native Token ......... $NATIVE_TOKEN"
 info "  Timelock ............. $TIMELOCK_ADDRESS"
+info "  Timelock Min Delay ... $TIMELOCK_DELAY seconds"
+info "  Timelock Exec Window . $TIMELOCK_WINDOW seconds"
 info "  Governor ............. $GOVERNOR_ADDRESS"
 info "  Treasury ............. $TREASURY_ADDRESS"
 info "  Factory .............. $FACTORY_ADDRESS"
+info "  Liquidity ............ $LIQUIDITY_ADDRESS"
 info "  Env file ............. $ENV_FILE"
 info "============================================================"
 printf '\n'

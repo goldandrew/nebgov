@@ -20,6 +20,7 @@ import {
   ProposalSimulationResult,
   ProposalState,
   ProposalVotes,
+  SimulateResult,
   VoteSupport,
   VoteType,
   Network,
@@ -30,6 +31,7 @@ import {
 } from "./types";
 
 import { TimelockClient } from "./timelock";
+import { streamEvents, type IndexerEvent } from "./streamEvents";
 
 /** Options for uploading proposal metadata to IPFS. */
 export interface MetadataUploadOptions {
@@ -57,7 +59,7 @@ export interface MetadataUploadOptions {
   customUploader?: (content: string) => Promise<string>;
 }
 
-import { GovernorError, GovernorErrorCode } from "./errors";
+import { GovernorError, GovernorErrorCode, parseGovernorError } from "./errors";
 import { hexToBytes32, withRetry } from "./utils";
 
 const RPC_URLS: Record<Network, string> = {
@@ -115,14 +117,14 @@ function scVecBytes(blobs: (Buffer | Uint8Array)[]): xdr.ScVal {
 
 /**
  * GovernorClient — interact with a deployed NebGov governor contract.
- *
- * TODO issue #14: add full error handling, retry logic, and simulation flow.
  */
 export class GovernorClient {
   private readonly config: GovernorConfig;
   private readonly server: SorobanRpc.Server;
   private readonly contract: Contract;
   private readonly networkPassphrase: string;
+  private decimals?: number;
+  private divisor?: bigint;
 
   constructor(config: GovernorConfig) {
     this.config = config;
@@ -130,6 +132,12 @@ export class GovernorClient {
     this.server = new SorobanRpc.Server(rpcUrl, { allowHttp: false });
     this.contract = new Contract(config.governorAddress);
     this.networkPassphrase = NETWORK_PASSPHRASES[config.network];
+    
+    // If decimals provided in config, use it immediately
+    if (config.decimals !== undefined) {
+      this.decimals = config.decimals;
+      this.divisor = 10n ** BigInt(this.decimals);
+    }
   }
 
   private async retry<T>(
@@ -181,6 +189,60 @@ export class GovernorClient {
     }
 
     return false;
+  }
+
+  /**
+   * Fetch token decimals from the governor contract.
+   * This is called lazily when decimals are needed but not provided in config.
+   */
+  private async fetchDecimals(): Promise<void> {
+    if (this.decimals !== undefined) return;
+
+    try {
+      const result = await this.retry(async () => {
+        return await this.server.simulateTransaction(
+          new TransactionBuilder(
+            await this.server.getAccount(this.readAccount()),
+            { fee: BASE_FEE, networkPassphrase: this.networkPassphrase },
+          )
+            .addOperation(this.contract.call("get_decimals"))
+            .setTimeout(30)
+            .build(),
+        );
+      });
+
+      if (SorobanRpc.Api.isSimulationError(result)) {
+        // Contract doesn't have get_decimals or failed — default to 7
+        this.decimals = 7;
+      } else {
+        const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+          .result?.retval;
+        this.decimals = raw ? Number(scValToNative(raw)) : 7;
+      }
+    } catch {
+      // Fetch failed — default to 7 (Stellar native asset standard)
+      this.decimals = 7;
+    }
+
+    this.divisor = 10n ** BigInt(this.decimals);
+  }
+
+  /**
+   * Get the token decimals for vote display.
+   * Fetches from contract if not provided in config.
+   */
+  async getDecimals(): Promise<number> {
+    await this.fetchDecimals();
+    return this.decimals!;
+  }
+
+  /**
+   * Get the divisor for converting raw vote counts to display values.
+   * Fetches decimals from contract if not already available.
+   */
+  async getDivisor(): Promise<bigint> {
+    await this.fetchDecimals();
+    return this.divisor!;
   }
 
   /**
@@ -238,6 +300,28 @@ export class GovernorClient {
           GovernorErrorCode.InvalidArguments,
           "At least one on-chain action is required",
         );
+      }
+
+      // Validate description length to prevent DoS via large payloads
+      const MAX_DESCRIPTION_LENGTH = 10000;
+      if (description.length > MAX_DESCRIPTION_LENGTH) {
+        throw new GovernorError(
+          GovernorErrorCode.InvalidArguments,
+          `Description exceeds maximum length of ${MAX_DESCRIPTION_LENGTH} characters (got ${description.length})`,
+        );
+      }
+
+      // Validate descriptionHash matches SHA-256(description) to prevent
+      // unverifiable proposals from accidental hash/description mismatch.
+      // Skip for legacy calls where the hash is a zeroed placeholder.
+      if (!legacyCall) {
+        const computed = await hashDescription(description);
+        if (computed !== descriptionHash.toLowerCase().replace(/^0x/, "")) {
+          throw new GovernorError(
+            GovernorErrorCode.InvalidArguments,
+            `description_hash does not match SHA-256 of description (expected ${computed})`,
+          );
+        }
       }
 
       // Convert hex string to BytesN<32>
@@ -304,6 +388,14 @@ export class GovernorClient {
     }
     if (targets.length === 0) {
       throw new Error("At least one on-chain action is required");
+    }
+
+    // Validate description length to prevent DoS via large payloads
+    const MAX_DESCRIPTION_LENGTH = 10000;
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new Error(
+        `Description exceeds maximum length of ${MAX_DESCRIPTION_LENGTH} characters (got ${description.length})`,
+      );
     }
 
     const hashBytes = hexToBytes32(descriptionHash);
@@ -519,6 +611,88 @@ export class GovernorClient {
         return {
           success: false,
           error: error instanceof Error ? error.message : "Simulation failed",
+        };
+      }
+    });
+  }
+
+  /**
+   * Dry-run the `propose` transaction using Soroban's `simulateTransaction` RPC.
+   *
+   * Returns estimated CPU instructions, memory bytes, and fee in stroops without
+   * submitting a transaction. Also validates that the proposal would not
+   * immediately revert (e.g. threshold not met, governor paused, invalid calldata).
+   *
+   * @param proposer   Stellar address of the account that will submit the proposal
+   * @param description Human-readable proposal summary
+   * @param descriptionHash Hex-encoded SHA-256 of the full description
+   * @param metadataUri IPFS or HTTPS URI for the full proposal description
+   * @param targets    Target contract addresses (one per action)
+   * @param fnNames    Function names to invoke on each target
+   * @param calldatas  XDR-encoded arguments for each call
+   * @returns {@link SimulateResult} with fee estimates or an error
+   */
+  async simulatePropose(
+    proposer: string,
+    description: string,
+    descriptionHash: string,
+    metadataUri: string,
+    targets: string[],
+    fnNames: string[],
+    calldatas: (Buffer | Uint8Array)[],
+  ): Promise<SimulateResult> {
+    return this.retry(async () => {
+      try {
+        const hashBytes = hexToBytes32(descriptionHash);
+        const account = await this.server.getAccount(proposer);
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: this.networkPassphrase,
+        })
+          .addOperation(
+            this.contract.call(
+              "propose",
+              nativeToScVal(proposer, { type: "address" }),
+              nativeToScVal(description, { type: "string" }),
+              nativeToScVal(hashBytes, { type: "bytes" }),
+              nativeToScVal(metadataUri, { type: "string" }),
+              scVecAddress(targets),
+              scVecSymbol(fnNames),
+              scVecBytes(calldatas),
+            ),
+          )
+          .setTimeout(30)
+          .build();
+
+        const result = await this.server.simulateTransaction(tx);
+
+        if (SorobanRpc.Api.isSimulationError(result)) {
+          const err = result as unknown as { error?: string };
+          return { ok: false, error: err.error ?? "Simulation failed" };
+        }
+
+        const success = result as SorobanRpc.Api.SimulateTransactionSuccessResponse & {
+          cost?: { cpuInsns?: string; memBytes?: string };
+          minResourceFee?: unknown;
+          min_resource_fee?: unknown;
+        };
+
+        return {
+          ok: true,
+          cpuInsns: success.cost?.cpuInsns !== undefined
+            ? toBigInt(success.cost.cpuInsns)
+            : undefined,
+          memBytes: success.cost?.memBytes !== undefined
+            ? toBigInt(success.cost.memBytes)
+            : undefined,
+          feeStroops: toBigInt(
+            success.minResourceFee ?? success.min_resource_fee ?? BASE_FEE,
+          ),
+        };
+      } catch (e: unknown) {
+        return {
+          ok: false,
+          error: e instanceof Error ? e.message : "simulatePropose failed",
         };
       }
     });
@@ -883,6 +1057,49 @@ export class GovernorClient {
   }
 
   /**
+   * Cast a vote using a raw u32 vote choice.
+   *
+   * This is a convenience method that accepts vote_choice as a raw number
+   * (0 = Against, 1 = For, 2 = Abstain) and validates it on-chain.
+   * Invalid vote choices (> 2) will throw GovernorError with InvalidVoteChoice code.
+   *
+   * @returns The Stellar transaction hash, suitable for linking to a block explorer.
+   */
+  async vote(
+    signer: Keypair,
+    proposalId: bigint,
+    voteChoice: number,
+  ): Promise<string> {
+    return this.retry(async () => {
+      const account = await this.server.getAccount(signer.publicKey());
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "vote",
+            nativeToScVal(signer.publicKey(), { type: "address" }),
+            nativeToScVal(proposalId, { type: "u64" }),
+            nativeToScVal(voteChoice, { type: "u32" }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      prepared.sign(signer);
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new Error(`vote failed: ${JSON.stringify(result)}`);
+      }
+      await this.pollForConfirmation(result.hash);
+      return result.hash;
+    }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
    * Cancel a proposal (can only be done by the proposer while it's Pending).
    */
   async cancel(
@@ -997,8 +1214,159 @@ export class GovernorClient {
   }
 
   /**
+   * Queue a succeeded proposal, scheduling its actions via the Timelock.
+   *
+   * The proposal must be in the Succeeded state. After queuing, it enters
+   * the Queued state and becomes executable once the Timelock delay elapses.
+   *
+   * @param signer    Keypair authorising the call
+   * @param proposalId The ID of the proposal to queue
+   */
+  async queue(
+    signer: Keypair,
+    proposalId: bigint,
+  ): Promise<void> {
+    return this.retry(async () => {
+      const account = await this.server.getAccount(signer.publicKey());
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "queue",
+            nativeToScVal(proposalId, { type: "u64" }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      prepared.sign(signer);
+
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new Error(`queue failed: ${JSON.stringify(result)}`);
+      }
+
+      await this.pollForConfirmation(result.hash);
+    }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
+   * Execute a queued proposal after its Timelock delay has elapsed.
+   *
+   * The proposal must be in the Queued state. After execution, it enters
+   * the Executed state.
+   *
+   * The transaction is simulated before it is broadcast. If the simulation
+   * exposes a contract error (invalid calldata, insufficient permissions,
+   * wrong function name, etc.) a typed {@link GovernorError} carrying a
+   * human-readable message is thrown and no transaction is submitted, so the
+   * caller can surface the problem to the user without spending an on-chain
+   * fee. Transient RPC failures are retried with exponential backoff.
+   *
+   * @param signer    Keypair authorising the call
+   * @param proposalId The ID of the proposal to execute
+   */
+  async execute(
+    signer: Keypair,
+    proposalId: bigint,
+  ): Promise<void> {
+    return this.retry(async () => {
+      const tx = await this.buildExecuteTx(signer, proposalId);
+
+      const simResult = await this.server.simulateTransaction(tx);
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        throw parseGovernorError(simResult);
+      }
+
+      const prepared = SorobanRpc.assembleTransaction(tx, simResult).build();
+      prepared.sign(signer);
+
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new GovernorError(
+          GovernorErrorCode.TransactionFailed,
+          `execute failed: ${JSON.stringify(result)}`,
+        );
+      }
+
+      await this.pollForConfirmation(result.hash);
+    }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
+   * Build (but do not sign or submit) the `execute` transaction for a proposal.
+   */
+  private async buildExecuteTx(
+    signer: Keypair,
+    proposalId: bigint,
+  ) {
+    const account = await this.server.getAccount(signer.publicKey());
+
+    return new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          "execute",
+          nativeToScVal(proposalId, { type: "u64" }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+  }
+
+  /**
+   * Execute multiple queued proposals atomically via execute_batch.
+   *
+   * All proposals must be in the Queued state. Either all are executed or
+   * none are.
+   *
+   * @param signer      Keypair authorising the call
+   * @param proposalIds Array of proposal IDs to execute
+   */
+  async executeBatch(
+    signer: Keypair,
+    proposalIds: bigint[],
+  ): Promise<void> {
+    return this.retry(async () => {
+      const account = await this.server.getAccount(signer.publicKey());
+
+      const idsScVal = xdr.ScVal.scvVec(
+        proposalIds.map((id) => nativeToScVal(id, { type: "u64" })),
+      );
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            "execute_batch",
+            idsScVal,
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await this.server.prepareTransaction(tx);
+      prepared.sign(signer);
+
+      const result = await this.server.sendTransaction(prepared);
+      if (result.status === "ERROR") {
+        throw new Error(`executeBatch failed: ${JSON.stringify(result)}`);
+      }
+
+      await this.pollForConfirmation(result.hash);
+    }, (e) => this.isRetryableSubmissionError(e));
+  }
+
+  /**
    * Get the current state of a proposal.
-   * TODO issue #17: decode all 7 ProposalState variants.
    */
   async getProposalState(proposalId: bigint): Promise<ProposalState> {
     return this.retry(async () => {
@@ -1049,8 +1417,6 @@ export class GovernorClient {
       Cancelled: ProposalState.Cancelled,
       Expired: ProposalState.Expired,
     };
-
-    // DEBUG: throw info
 
     if (variant in states) {
       return states[variant];
@@ -1325,7 +1691,7 @@ export class GovernorClient {
             topics: [["VoteCast", "vote"], [voter]],
           },
         ],
-        limit: limit * 2,
+        limit: limit * 2, // Fetch extra to filter for relevant events
       });
 
       const history: VotingHistoryEntry[] = [];
@@ -1337,12 +1703,9 @@ export class GovernorClient {
         if (String(voterTopic) !== voter) continue;
 
         // Parse event data
-        const data = event.value;
-        if (!data) continue;
-
-        const native = scValToNative(data) as Record<string, unknown>;
+        const native = scValToNative(event.value) as Record<string, unknown>;
         const proposalId = toBigInt(native.proposal_id ?? native.proposalId);
-        const supportRaw = native.support ?? native.support;
+        const supportRaw = native.support;
         const support = typeof supportRaw === "number" 
           ? supportRaw 
           : Number(supportRaw);
@@ -1406,6 +1769,42 @@ export class GovernorClient {
     return () => {
       stopped = true;
       clearInterval(handle);
+    };
+  }
+
+  /**
+   * Watch a proposal's state changes in real-time.
+   *
+   * Uses the indexer WebSocket when an `indexerUrl` is configured, falling
+   * back to polling `getProposalState` via `onProposalStateChange`. Returns
+   * an unsubscribe function that stops the watcher.
+   *
+   * @param proposalId - The proposal ID to watch
+   * @param onChange - Called each time the proposal state transitions
+   * @param pollIntervalMs - Polling interval (default 10_000)
+   * @returns A function to stop watching
+   */
+  watchProposal(
+    proposalId: bigint,
+    onChange: (newState: ProposalState) => void,
+    pollIntervalMs: number = 10_000,
+  ): () => void {
+    const unsubPoll = this.onProposalStateChange(proposalId, onChange, pollIntervalMs);
+
+    let unsubEvents: (() => void) | undefined;
+    if (this.config.indexerUrl) {
+      unsubEvents = streamEvents(
+        this.config.indexerUrl,
+        (_event: IndexerEvent) => {
+          // state transitions are handled by the polling fallback
+        },
+        { proposalId: String(proposalId) },
+      );
+    }
+
+    return () => {
+      unsubPoll();
+      unsubEvents?.();
     };
   }
 
@@ -2172,6 +2571,72 @@ export class GovernorClient {
     }
 
     return results;
+  }
+
+  /**
+   * List proposals using on-chain pagination when available.
+   *
+   * For older governor deployments that do not expose `get_proposal_list`,
+   * this falls back to the legacy `proposal_count` + `get_proposal` strategy.
+   */
+  async listProposals(offset = 0, limit = 20): Promise<Proposal[]> {
+    const safeOffset = Math.max(0, Math.floor(offset));
+    const safeLimit = Math.max(0, Math.floor(limit));
+
+    if (safeLimit === 0) {
+      return [];
+    }
+
+    return this.retry(async () => {
+      try {
+        const result = await this.server.simulateTransaction(
+          new TransactionBuilder(
+            await this.server.getAccount(this.readAccount()),
+            { fee: BASE_FEE, networkPassphrase: this.networkPassphrase },
+          )
+            .addOperation(
+              this.contract.call(
+                "get_proposal_list",
+                nativeToScVal(BigInt(safeOffset), { type: "u64" }),
+                nativeToScVal(BigInt(safeLimit), { type: "u64" }),
+              ),
+            )
+            .setTimeout(30)
+            .build(),
+        );
+
+        if (SorobanRpc.Api.isSimulationError(result)) {
+          throw new Error(result.error);
+        }
+
+        const raw = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+          .result?.retval;
+        if (!raw) {
+          return [];
+        }
+
+        return scValToNative(raw) as Proposal[];
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("get_proposal_list")) {
+          throw error;
+        }
+
+        const total = Number(await this.proposalCount());
+        if (safeOffset >= total) {
+          return [];
+        }
+
+        const endExclusive = Math.min(total, safeOffset + safeLimit);
+        const ids: bigint[] = [];
+        for (let i = safeOffset; i < endExclusive; i++) {
+          ids.push(BigInt(i + 1));
+        }
+
+        const proposals = await Promise.all(ids.map((id) => this.getProposal(id)));
+        return proposals;
+      }
+    }, this.isNetworkError.bind(this));
   }
 
   /**

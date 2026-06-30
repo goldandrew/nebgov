@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# ============================================================
+# scripts/verify-deployment.sh
+#
+# Post-deploy validation: queries each contract's on-chain
+# settings and compares them against expected values from
+# the env file. Exits non-zero if any check fails (CI-safe).
+#
+# Usage:
+#   ./scripts/verify-deployment.sh              # uses .env.testnet
+#   ENV_FILE=.env.custom ./scripts/verify-deployment.sh
+# ============================================================
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env.testnet}"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+FAILURES=0
+
+pass()  { printf "${GREEN}[✓]${NC} %s\n" "$*"; }
+fail()  { printf "${RED}[✗]${NC} %s\n" "$*" >&2; FAILURES=$((FAILURES + 1)); }
+info()  { printf "${CYAN}[info]${NC}  %s\n" "$*"; }
+
+[[ -f "$ENV_FILE" ]] || { printf "${RED}[error]${NC} Env file not found: %s\n" "$ENV_FILE" >&2; exit 1; }
+
+set -a
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+set +a
+
+command -v stellar >/dev/null 2>&1 || { printf "${RED}[error]${NC} stellar-cli not found\n" >&2; exit 1; }
+
+NETWORK="${STELLAR_NETWORK:-testnet}"
+IDENTITY="${STELLAR_IDENTITY:-deployer}"
+
+# Call a contract getter; returns "ERROR" if the invocation fails.
+query() {
+  stellar contract invoke \
+    --id "$1" \
+    --source "$IDENTITY" \
+    --network "$NETWORK" \
+    -- "$2" 2>/dev/null || echo "ERROR"
+}
+
+# Assert got == expected and print a labelled result.
+check() {
+  local label="$1" got="$2" expected="$3"
+  if [[ "$got" == "$expected" ]]; then
+    pass "$label: $got"
+  else
+    fail "$label: got '$got', expected '$expected'"
+  fi
+}
+
+DEPLOYER_ADDR="${DEPLOYER_ADDR:-$(stellar keys address "${IDENTITY}" 2>/dev/null || echo '')}"
+
+info "Verifying NebGov deployment against $ENV_FILE"
+printf '\n'
+
+# ---- TokenVotes --------------------------------------------------------
+info "TokenVotes (${TOKEN_VOTES_ADDRESS:-<not set>})"
+check "  token_votes.admin" \
+  "$(query "${TOKEN_VOTES_ADDRESS:-}" admin)" \
+  "\"${DEPLOYER_ADDR}\""
+
+# ---- Timelock ----------------------------------------------------------
+info "Timelock (${TIMELOCK_ADDRESS:-<not set>})"
+check "  timelock.min_delay" \
+  "$(query "${TIMELOCK_ADDRESS:-}" min_delay)" \
+  "${TIMELOCK_MIN_DELAY:-3600}"
+check "  timelock.execution_window" \
+  "$(query "${TIMELOCK_ADDRESS:-}" execution_window)" \
+  "${TIMELOCK_EXECUTION_WINDOW:-86400}"
+
+# ---- Governor ----------------------------------------------------------
+info "Governor (${GOVERNOR_ADDRESS:-<not set>})"
+check "  governor.voting_delay" \
+  "$(query "${GOVERNOR_ADDRESS:-}" voting_delay)" \
+  "${VOTING_DELAY:-60}"
+check "  governor.voting_period" \
+  "$(query "${GOVERNOR_ADDRESS:-}" voting_period)" \
+  "${VOTING_PERIOD:-17280}"
+check "  governor.quorum_numerator" \
+  "$(query "${GOVERNOR_ADDRESS:-}" quorum_numerator)" \
+  "${QUORUM_NUMERATOR:-4}"
+check "  governor.proposal_threshold" \
+  "$(query "${GOVERNOR_ADDRESS:-}" proposal_threshold)" \
+  "${PROPOSAL_THRESHOLD:-100000000}"
+
+# ---- Treasury ----------------------------------------------------------
+info "Treasury (${TREASURY_ADDRESS:-<not set>})"
+check "  treasury.threshold" \
+  "$(query "${TREASURY_ADDRESS:-}" threshold)" \
+  "${TREASURY_THRESHOLD:-1}"
+
+# ---- Liquidity ---------------------------------------------------------
+info "Liquidity (${LIQUIDITY_ADDRESS:-<not set>})"
+check "  liquidity.governor" \
+  "$(query "${LIQUIDITY_ADDRESS:-}" governor)" \
+  "\"${DEPLOYER_ADDR}\""
+
+printf '\n'
+if [[ "$FAILURES" -gt 0 ]]; then
+  printf "${RED}%d check(s) failed.${NC}\n" "$FAILURES" >&2
+  exit 1
+else
+  printf "${GREEN}All checks passed.${NC}\n"
+fi

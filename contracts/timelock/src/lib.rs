@@ -1,6 +1,9 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 
+mod events;
+use events::*;
+
 use soroban_sdk::xdr::{FromXdr, ToXdr};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Symbol,
@@ -73,6 +76,9 @@ impl TimelockContract {
         min_delay: u64,
         execution_window: u64,
     ) {
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("already initialized");
+        }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Governor, &governor);
@@ -185,9 +191,9 @@ impl TimelockContract {
         );
 
         let batch = BatchOperation {
-            targets,
+            targets: targets.clone(),
             datas,
-            fn_names,
+            fn_names: fn_names.clone(),
             ready_at,
             expires_at,
             executed: false,
@@ -199,8 +205,28 @@ impl TimelockContract {
             .persistent()
             .set(&DataKey::BatchOperation(batch_op_id.clone()), &batch);
 
+        // Extend TTL to cover the full operation lifecycle (delay + execution window)
+        // plus a safety buffer. Stellar mainnet closes ledgers roughly every 5 seconds.
+        let seconds_until_expiry = delay + execution_window;
+        let ttl_ledgers = ((seconds_until_expiry / 5) + 1000) as u32;
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &DataKey::BatchOperation(batch_op_id.clone()),
+                ttl_ledgers,
+                ttl_ledgers,
+            );
+
         env.events()
             .publish((symbol_short!("schbatch"),), batch_op_id.clone());
+        emit_batch_operation_scheduled(
+            &env,
+            &batch_op_id,
+            &targets,
+            &fn_names,
+            ready_at,
+            expires_at,
+        );
 
         batch_op_id
     }
@@ -238,7 +264,8 @@ impl TimelockContract {
         let args = Self::decode_invocation_args(&env, &op.data);
         env.invoke_contract::<()>(&op.target, &op.fn_name, args);
 
-        env.events().publish((symbol_short!("execute"),), op_id);
+        env.events().publish((symbol_short!("execute"),), op_id.clone());
+        emit_operation_executed(&env, &op_id, &caller);
     }
 
     /// Execute a batch of operations atomically under a single `batch_op_id`.
@@ -283,7 +310,8 @@ impl TimelockContract {
         }
 
         env.events()
-            .publish((symbol_short!("exbatch"),), batch_op_id);
+            .publish((symbol_short!("exbatch"),), batch_op_id.clone());
+        emit_batch_operation_executed(&env, &batch_op_id, &caller);
     }
 
     /// Cancel a pending operation or batch operation.
@@ -313,6 +341,7 @@ impl TimelockContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::Operation(op_id.clone()), &op);
+            emit_operation_cancelled(&env, &op_id, &caller);
         } else if let Some(mut batch) = env
             .storage()
             .persistent()
@@ -323,6 +352,7 @@ impl TimelockContract {
             env.storage()
                 .persistent()
                 .set(&DataKey::BatchOperation(op_id.clone()), &batch);
+            emit_batch_operation_cancelled(&env, &op_id, &caller);
         } else {
             panic!("operation not found");
         }
@@ -406,6 +436,20 @@ impl TimelockContract {
             .expect("not initialized")
     }
 
+    /// Get a single operation by its op_id.
+    pub fn get_operation(env: Env, op_id: Bytes) -> Option<Operation> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Operation(op_id))
+    }
+
+    /// Get a batch operation by its batch_op_id.
+    pub fn get_batch_operation(env: Env, batch_op_id: Bytes) -> Option<BatchOperation> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BatchOperation(batch_op_id))
+    }
+
     /// Update the minimum delay. Only admin.
     pub fn update_delay(env: Env, caller: Address, new_delay: u64) {
         caller.require_auth();
@@ -430,6 +474,24 @@ impl TimelockContract {
             (symbol_short!("upd_win"),),
             (old_window, new_window),
         );
+    }
+
+    /// Update the minimum delay. Only governor (governance-gated).
+    pub fn update_min_delay(env: Env, caller: Address, new_delay: u64) {
+        caller.require_auth();
+        Self::require_governor(&env, &caller);
+        assert!(new_delay > 0, "delay must be positive");
+        let execution_window: u64 = env.storage().instance().get(&DataKey::ExecutionWindow).unwrap_or(1_209_600);
+        assert!(
+            new_delay.checked_add(execution_window).is_some(),
+            "delay + execution_window overflow"
+        );
+        let old_delay: u64 = env.storage()
+            .instance()
+            .get(&DataKey::MinDelay)
+            .unwrap_or(86_400);
+        env.storage().instance().set(&DataKey::MinDelay, &new_delay);
+        emit_min_delay_updated(&env, old_delay, new_delay);
     }
 
     fn require_governor(env: &Env, caller: &Address) {
@@ -467,9 +529,9 @@ impl TimelockContract {
         );
 
         let op = Operation {
-            target,
+            target: target.clone(),
             data,
-            fn_name,
+            fn_name: fn_name.clone(),
             ready_at,
             expires_at,
             executed: false,
@@ -480,8 +542,18 @@ impl TimelockContract {
         env.storage()
             .persistent()
             .set(&DataKey::Operation(op_id.clone()), &op);
+
+        // Extend TTL to cover the full operation lifecycle (delay + execution window)
+        // plus a safety buffer. Stellar mainnet closes ledgers roughly every 5 seconds.
+        let seconds_until_expiry = delay + execution_window;
+        let ttl_ledgers = ((seconds_until_expiry / 5) + 1000) as u32;
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Operation(op_id.clone()), ttl_ledgers, ttl_ledgers);
+
         env.events()
             .publish((symbol_short!("schedule"),), op_id.clone());
+        emit_operation_scheduled(&env, &op_id, &target, &fn_name, ready_at, expires_at);
 
         op_id
     }

@@ -118,6 +118,8 @@ export interface GovernorConfig {
   maxAttempts?: number;
   /** Base delay in milliseconds for exponential backoff (default: 1000) */
   baseDelayMs?: number;
+  /** Token decimals for vote display (optional — fetched from contract if not provided) */
+  decimals?: number;
 }
 
 export interface TimelockOperation {
@@ -325,6 +327,29 @@ export interface SpendingCap {
   periodLedgers: number;
 }
 
+export interface LiquidityConfig {
+  /** Contract address of the liquidity pool contract */
+  liquidityAddress: string;
+  /** Stellar network to connect to */
+  network: Network;
+  /** RPC URL override (optional — defaults to public horizon) */
+  rpcUrl?: string;
+  /** Optional funded classic account used for read-only simulation calls. */
+  simulationAccount?: string;
+  /** Maximum retry attempts for failed operations (default: 3) */
+  maxAttempts?: number;
+  /** Base delay between retries in milliseconds (default: 1000) */
+  baseDelayMs?: number;
+}
+
+/** On-chain state of a single two-asset liquidity pool. */
+export interface Pool {
+  reserveA: bigint;
+  reserveB: bigint;
+  totalLpSupply: bigint;
+  feeBps: number;
+}
+
 /** A treasury batch transfer event as returned by the indexer. */
 export interface BatchTransferEvent {
   /** SHA-256 operation hash (hex-encoded) */
@@ -369,4 +394,23 @@ export interface VotingHistoryEntry {
   reason?: string;
   /** Ledger sequence when the vote was cast */
   ledger: number;
+}
+
+/**
+ * Result of a {@link GovernorClient.simulatePropose} dry-run.
+ *
+ * When `ok` is true all resource fields are populated.
+ * When `ok` is false only `error` is set.
+ */
+export interface SimulateResult {
+  /** Whether the simulation succeeded (would not revert on-chain). */
+  ok: boolean;
+  /** Estimated CPU instructions consumed by the propose transaction. */
+  cpuInsns?: bigint;
+  /** Estimated memory bytes consumed by the propose transaction. */
+  memBytes?: bigint;
+  /** Estimated fee in stroops required to submit the transaction. */
+  feeStroops?: bigint;
+  /** Human-readable error message when `ok` is false. */
+  error?: string;
 }

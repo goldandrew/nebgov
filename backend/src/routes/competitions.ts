@@ -276,6 +276,11 @@ router.post(
         return res.status(400).json({ error: "Competition is not active" });
       }
 
+      if (new Date() > new Date(competition.end_date)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "Competition has ended" });
+      }
+
       if (new Date() >= new Date(competition.start_date)) {
         await client.query("ROLLBACK");
         return res

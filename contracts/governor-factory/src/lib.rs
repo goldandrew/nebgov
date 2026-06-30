@@ -3,9 +3,15 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracterror, contracttype, symbol_short, Address,
-    BytesN, Env,
+    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
+    Address, BytesN, Env, Vec,
 };
+
+mod events;
+use events::emit_governor_deployed;
+
+const DEPLOYED_CONTRACT_COUNT: i128 = 3;
+const MIN_CONTRACT_RESERVE_STROOPS: i128 = 5_000_000;
 
 /// Error codes returned by the governor factory.
 #[contracterror]
@@ -15,6 +21,8 @@ pub enum FactoryError {
     InvalidQuorumNumerator = 2,
     InvalidTimelockDelay = 3,
     InvalidVoteType = 4,
+    InsufficientBalance = 5,
+    WasmNotFound = 6,
 }
 
 #[contracttype]
@@ -44,6 +52,8 @@ pub enum DataKey {
     TimelockWasm,
     TokenVotesWasm,
     Admin,
+    NativeToken,
+    GovernorList,
 }
 
 #[contractclient(name = "TokenVotesClient")]
@@ -114,6 +124,38 @@ impl GovernorFactoryContract {
             .instance()
             .set(&DataKey::TokenVotesWasm, &token_votes_wasm);
         env.storage().instance().set(&DataKey::GovernorCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorList, &Vec::<u64>::new(&env));
+    }
+
+    /// Configure the network native asset token contract used for deployer
+    /// balance preflight checks.
+    pub fn set_native_token(env: Env, admin: Address, native_token: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("factory not initialized");
+        if admin != stored_admin {
+            panic!("not admin");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::NativeToken, &native_token);
+    }
+
+    /// Return the configured native asset token contract, if any.
+    pub fn native_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::NativeToken)
+    }
+
+    /// Estimate the minimum XLM reserve required to deploy the three-contract
+    /// governor stack.
+    pub fn estimate_deploy_cost(_env: Env) -> i128 {
+        DEPLOYED_CONTRACT_COUNT * MIN_CONTRACT_RESERVE_STROOPS
     }
 
     /// Deploy a new governor + timelock pair and register it.
@@ -138,7 +180,11 @@ impl GovernorFactoryContract {
         if voting_period == 0 {
             env.panic_with_error(FactoryError::InvalidVotingPeriod);
         }
-        if quorum_numerator == 0 {
+        // quorum_numerator == 0 is intentionally valid: the governor contract handles it
+        // by returning 0 (any positive vote count satisfies quorum), useful for signaling
+        // protocols and prediction markets. Only reject values above 100 (the governor's
+        // own validate_settings ceiling).
+        if quorum_numerator > 100 {
             env.panic_with_error(FactoryError::InvalidQuorumNumerator);
         }
         if timelock_delay == 0 {
@@ -147,6 +193,7 @@ impl GovernorFactoryContract {
         if vote_type > 2 {
             env.panic_with_error(FactoryError::InvalidVoteType);
         }
+        Self::require_sufficient_deploy_balance(&env, &deployer);
 
         let count: u64 = env
             .storage()
@@ -289,6 +336,16 @@ impl GovernorFactoryContract {
             .set(&DataKey::Governor(id), &entry);
         env.storage().instance().set(&DataKey::GovernorCount, &id);
 
+        let mut list: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorList)
+            .unwrap_or(Vec::<u64>::new(&env));
+        list.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::GovernorList, &list);
+
         env.events().publish(
             (
                 symbol_short!("deploy"),
@@ -311,12 +368,45 @@ impl GovernorFactoryContract {
             .expect("governor not found")
     }
 
+    /// Get a paginated list of all registered governors.
+    pub fn get_all_governors(env: Env, offset: u32, limit: u32) -> Vec<GovernorEntry> {
+        let list: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GovernorList)
+            .unwrap_or(Vec::<u64>::new(&env));
+        let len = list.len();
+        let start = (offset as u32).min(len as u32);
+        let end = ((offset + limit) as u32).min(len as u32);
+        let mut entries = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            let id = list.get(i).unwrap();
+            let entry = Self::get_governor(env.clone(), id);
+            entries.push_back(entry);
+            i += 1;
+        }
+        entries
+    }
+
     /// Get total number of deployed governors.
     pub fn governor_count(env: Env) -> u64 {
         env.storage()
             .instance()
             .get(&DataKey::GovernorCount)
             .unwrap_or(0)
+    }
+
+    fn require_sufficient_deploy_balance(env: &Env, deployer: &Address) {
+        let native_token: Option<Address> = env.storage().instance().get(&DataKey::NativeToken);
+        let Some(native_token) = native_token else {
+            return;
+        };
+
+        let balance = token::TokenClient::new(env, &native_token).balance(deployer);
+        if balance < Self::estimate_deploy_cost(env.clone()) {
+            env.panic_with_error(FactoryError::InsufficientBalance);
+        }
     }
 }
 

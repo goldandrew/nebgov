@@ -19,4 +19,13 @@ describe("ProposalStateBadge", () => {
     const tree = renderer.create(<ProposalStateBadge state={state} />).toJSON();
     expect(tree).toMatchSnapshot();
   });
+
+  it.each(STATES)("renders a non-empty badge for state %s", (state) => {
+    const tree = renderer.create(<ProposalStateBadge state={state} />).toJSON();
+    expect(tree).toBeTruthy();
+    expect(tree).toHaveProperty("type", "span");
+    expect(tree).toHaveProperty("children");
+    expect(Array.isArray(tree.children)).toBe(true);
+    expect(tree.children.length).toBeGreaterThan(0);
+  });
 });

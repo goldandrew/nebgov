@@ -420,7 +420,8 @@ export class VotesClient {
     }
 
     const options = arg1 ?? {};
-    const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+    const limit = Math.max(1, Math.min(options.limit ?? 50, 100));
+    const offset = Math.max(0, options.offset ?? 0);
 
     const delegationMap =
       options.delegationMap ??
@@ -449,22 +450,34 @@ export class VotesClient {
       byDelegate.get(delegatee)!.add(delegator);
     }
 
-    // Query current voting power for each unique delegate
+    // Query current voting power in batches to avoid OOM on large delegate sets
     const delegateAddresses = Array.from(byDelegate.keys());
-    const powerEntries = await Promise.all(
-      delegateAddresses.map(async (addr) => {
-        const [votingPower, baseVotes] = await Promise.all([
-          this.getVotes(addr),
-          this.getBaseVotes(addr),
-        ]);
-        return {
-          address: addr,
-          votingPower,
-          baseVotes,
-          delegatorCount: byDelegate.get(addr)!.size,
-        };
-      }),
-    );
+    const POWER_BATCH_SIZE = 20;
+    const powerEntries: Array<{
+      address: string;
+      votingPower: bigint;
+      baseVotes: bigint;
+      delegatorCount: number;
+    }> = [];
+
+    for (let i = 0; i < delegateAddresses.length; i += POWER_BATCH_SIZE) {
+      const batch = delegateAddresses.slice(i, i + POWER_BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (addr) => {
+          const [votingPower, baseVotes] = await Promise.all([
+            this.getVotes(addr),
+            this.getBaseVotes(addr),
+          ]);
+          return {
+            address: addr,
+            votingPower,
+            baseVotes,
+            delegatorCount: byDelegate.get(addr)!.size,
+          };
+        }),
+      );
+      powerEntries.push(...batchResults);
+    }
 
     const delegates = powerEntries
       .filter((d) => d.votingPower > 0n)
@@ -475,7 +488,7 @@ export class VotesClient {
             ? -1
             : 0,
       )
-      .slice(0, limit);
+      .slice(offset, offset + limit);
 
     const result: TopDelegatesResult = {
       delegates,
@@ -500,10 +513,8 @@ export class VotesClient {
   async getVotingPowerDistribution(
     fromLedger?: number,
   ): Promise<VotingPowerDistribution> {
-    const [delegationMap, totalSupply] = await Promise.all([
-      this.buildDelegationMap(fromLedger),
-      this.getTotalSupply(),
-    ]);
+    const delegationMap = await this.buildDelegationMap(fromLedger);
+    const totalSupply = await this.getTotalSupply();
 
     if (delegationMap.size === 0) {
       return {
@@ -559,12 +570,13 @@ export class VotesClient {
 
     if (delegators.length === 0) return [];
 
-    const results = await Promise.all(
-      delegators.map(async (delegator) => ({
+    const results: any[] = [];
+    for (const delegator of delegators) {
+      results.push({
         delegator,
         power: await this.getVotes(delegator),
-      })),
-    );
+      });
+    }
 
     return results
       .filter((d) => d.power > 0n)
@@ -587,17 +599,16 @@ export class VotesClient {
     const totalSupply = await this.getTotalSupply();
     if (totalSupply === 0n) return [];
 
-    const delegates = await Promise.all(
-      addresses.map(async (address) => {
-        const votes = await this.getVotes(address);
-        return {
+    const delegates: any[] = [];
+    for (const address of addresses) {
+      const votes = await this.getVotes(address);
+      delegates.push({
           address,
           votes,
           percentOfSupply:
             totalSupply > 0n ? Number((votes * 10000n) / totalSupply) / 100 : 0,
-        };
-      }),
-    );
+      });
+    }
 
     return delegates
       .filter((d) => d.votes > 0n)
@@ -964,8 +975,10 @@ export class VotesClient {
 }
 
 export interface TopDelegatesOptions {
-  /** Maximum number of delegates to return (default 20). */
+  /** Maximum number of delegates to return (default 50). */
   limit?: number;
+  /** Number of delegates to skip before returning results (default 0). */
+  offset?: number;
   /** Earliest ledger to scan events from (default latest - DEFAULT_SCAN_WINDOW). */
   fromLedger?: number;
   /** Opaque pagination cursor returned by a prior call. */

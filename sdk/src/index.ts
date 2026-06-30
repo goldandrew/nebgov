@@ -19,6 +19,7 @@ export { FactoryClient } from "./factory";
 export type { GovernorEntry, DeploySettings } from "./factory";
 export { TimelockClient } from "./timelock";
 export { TreasuryClient } from "./treasury";
+export { LiquidityClient } from "./liquidity";
 export { WrapperClient } from "./wrapper";
 export type { WrapperConfig } from "./wrapper";
 export {
@@ -79,6 +80,6 @@ export {
   parseUnpauseEvent,
 } from "./events";
 export * from "./types";
-export { computeQuadraticWeight, hexToBytes32 } from "./utils";
+export { computeQuadraticWeight, hexToBytes32, encodeCalldata, decodeCalldata } from "./utils";
 export { streamEvents } from "./streamEvents";
 export type { IndexerEvent, WsEventType, StreamEventsOptions, UnsubscribeFn } from "./streamEvents";
