@@ -184,9 +184,13 @@ export async function processEvents(
         contractId === config.optimisticGovernorAddress
       );
       const isVoteEscrow = !!(
+ issue-1279-1283-1281-1280
+        contractId && config.voteEscrowAddress && contractId === config.voteEscrowAddress
+
         contractId &&
         config.voteEscrowAddress &&
         contractId === config.voteEscrowAddress
+ main
       );
 
       try {
@@ -407,6 +411,9 @@ export async function processEvents(
         } else if (isOptimisticGovernor) {
           await handleOptimisticGovernorEvent(event, eventType, topics);
         } else if (isVoteEscrow) {
+ issue-1279-1283-1281-1280
+          await handleVoteEscrowEvent(event, eventType, topics);
+
           switch (eventType) {
             case "LockCreated":
               await handleLockCreated(event, topics);
@@ -423,6 +430,7 @@ export async function processEvents(
             default:
               break;
           }
+ main
         } else {
           switch (eventType) {
             case "ProposalCreated":
