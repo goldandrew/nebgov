@@ -498,3 +498,96 @@ const GOLDEN_PROOFS: [&[&str]; 5] = [
     ],
 ];
 
+#[test]
+fn set_admin_rotates_the_admin_address() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    let new_admin = Address::generate(&env);
+    f.client.set_admin(&f.admin, &new_admin);
+
+    assert_eq!(f.client.get_admin(), new_admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn set_admin_rejects_non_admin_caller() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    let non_admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    f.client.set_admin(&non_admin, &new_admin);
+}
+
+#[test]
+fn set_admin_emits_admin_set_event() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    let new_admin = Address::generate(&env);
+    f.client.set_admin(&f.admin, &new_admin);
+
+    let events = env.events().all();
+    let event = events.last().unwrap();
+
+    assert_eq!(event.topics.len(), 1);
+}
+
+#[test]
+fn update_epoch_duration_changes_duration_for_next_epochs() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    let new_duration = 2_000u32;
+    f.client.update_epoch_duration(&f.admin, &new_duration);
+
+    let current_epoch = f.client.get_epoch(&0).unwrap();
+    // Current epoch should retain original duration
+    assert_eq!(
+        current_epoch.end_ledger - current_epoch.start_ledger,
+        EPOCH_DURATION
+    );
+
+    // Start next epoch
+    advance_to(&env, current_epoch.end_ledger);
+    f.client.start_next_epoch();
+
+    let next_epoch = f.client.get_epoch(&1).unwrap();
+    // Next epoch should use new duration
+    assert_eq!(next_epoch.end_ledger - next_epoch.start_ledger, new_duration);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn update_epoch_duration_rejects_non_admin_caller() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    let non_admin = Address::generate(&env);
+    f.client.update_epoch_duration(&non_admin, &2_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn update_epoch_duration_rejects_zero_duration() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    f.client.update_epoch_duration(&f.admin, &0);
+}
+
+#[test]
+fn update_epoch_duration_emits_event() {
+    let env = Env::default();
+    let f = setup(&env);
+
+    let new_duration = 2_000u32;
+    f.client.update_epoch_duration(&f.admin, &new_duration);
+
+    let events = env.events().all();
+    let event = events.last().unwrap();
+
+    assert_eq!(event.topics.len(), 1);
+}
+

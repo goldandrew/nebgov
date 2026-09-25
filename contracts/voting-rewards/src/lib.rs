@@ -307,6 +307,49 @@ impl VotingRewardsContract {
         Self::available_pool(&env)
     }
 
+    /// Set a new admin address. Admin-only.
+    ///
+    /// The new admin takes effect immediately for all subsequent operations
+    /// (publishing roots, rotating admin again, updating epoch duration).
+    pub fn set_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| env.panic_with_error(VotingRewardsError::NotInitialized));
+        if admin != stored_admin {
+            env.panic_with_error(VotingRewardsError::NotAuthorized);
+        }
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        events::emit_admin_set(&env, &new_admin);
+    }
+
+    /// Update the epoch duration for future epochs. Admin-only.
+    ///
+    /// The new duration applies only to epochs opened after this call.
+    /// Already-opened epochs keep their original duration.
+    pub fn update_epoch_duration(env: Env, admin: Address, new_duration_ledgers: u32) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| env.panic_with_error(VotingRewardsError::NotInitialized));
+        if admin != stored_admin {
+            env.panic_with_error(VotingRewardsError::NotAuthorized);
+        }
+        if new_duration_ledgers == 0 {
+            env.panic_with_error(VotingRewardsError::InvalidEpochDuration);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::EpochDurationLedgers, &new_duration_ledgers);
+        events::emit_epoch_duration_updated(&env, new_duration_ledgers);
+    }
+
     fn open_epoch(env: &Env, id: u64, duration: u32) {
         let start_ledger = env.ledger().sequence();
         let epoch = Epoch {
