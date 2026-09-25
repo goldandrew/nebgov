@@ -4,6 +4,7 @@ pub const EPOCH_STARTED_TOPIC: &str = "EpochStarted";
 pub const EPOCH_ROOT_PUBLISHED_TOPIC: &str = "EpochRootPublished";
 pub const REWARD_CLAIMED_TOPIC: &str = "RewardClaimed";
 pub const POOL_FUNDED_TOPIC: &str = "PoolFunded";
+pub const EPOCH_SWEPT_TOPIC: &str = "EpochSwept";
 
 pub fn emit_epoch_started(env: &Env, epoch_id: u64, start_ledger: u32, end_ledger: u32) {
     env.events().publish(
@@ -35,5 +36,12 @@ pub fn emit_pool_funded(env: &Env, funder: &Address, amount: i128) {
     env.events().publish(
         (Symbol::new(env, POOL_FUNDED_TOPIC), funder.clone()),
         amount,
+    );
+}
+
+pub fn emit_epoch_swept(env: &Env, epoch_id: u64, unclaimed_amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, EPOCH_SWEPT_TOPIC), epoch_id),
+        unclaimed_amount,
     );
 }
