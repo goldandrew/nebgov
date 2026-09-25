@@ -11,6 +11,5 @@ pub enum VoteEscrowError {
     InvalidDuration = 5,
     InvalidAmount = 6,
     InvalidEndLedger = 7,
-    Unauthorized = 8,
-    ArithmeticOverflow = 9,
+    ArithmeticOverflow = 8,
 }

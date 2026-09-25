@@ -366,7 +366,9 @@ impl VoteEscrowContract {
             .instance()
             .get(&DataKey::TotalLocked)
             .unwrap_or(0);
-        let new_total = current_total.saturating_sub(lock.amount);
+        let new_total = current_total.checked_sub(lock.amount)
+            .ok_or(VoteEscrowError::ArithmeticOverflow)
+            .unwrap();
         env.storage()
             .instance()
             .set(&DataKey::TotalLocked, &new_total);
@@ -600,116 +602,4 @@ impl VoteEscrowContract {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::{
-        testutils::Address as _,
-        Env,
-    };
-
-    #[test]
-    fn test_initialize() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let token = Address::generate(&env);
-        let contract_id = env.register(VoteEscrowContract, ());
-
-        env.as_contract(&contract_id, || {
-            VoteEscrowContract::initialize(
-                env.clone(),
-                admin.clone(),
-                token.clone(),
-                100,
-                1000,
-                25000,
-            );
-
-            let stored_token: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::LockedToken)
-                .unwrap();
-            assert_eq!(stored_token, token);
-        });
-    }
-
-    #[test]
-    fn test_compute_initial_voting_power_min_duration() {
-        let env = Env::default();
-        let power = VoteEscrowContract::compute_initial_voting_power(&env, 100, 100, 100, 1000, 25000);
-        assert_eq!(power, 100);
-    }
-
-    #[test]
-    fn test_compute_initial_voting_power_max_duration() {
-        let env = Env::default();
-        let power = VoteEscrowContract::compute_initial_voting_power(&env, 100, 1000, 100, 1000, 25000);
-        assert_eq!(power, 350);
-    }
-
-    #[test]
-    fn test_compute_initial_voting_power_mid_duration() {
-        let env = Env::default();
-        let power = VoteEscrowContract::compute_initial_voting_power(&env, 100, 550, 100, 1000, 25000);
-        assert!(power > 100 && power < 350);
-    }
-
-    #[test]
-    fn test_compute_decayed_power_at_start() {
-        let lock = Lock {
-            owner: Address::generate(&Env::default()),
-            amount: 100,
-            start_ledger: 100,
-            end_ledger: 200,
-            initial_voting_power: 125,
-            withdrawn: false,
-        };
-        let power = VoteEscrowContract::compute_decayed_power(&lock, 100);
-        assert_eq!(power, 125);
-    }
-
-    #[test]
-    fn test_compute_decayed_power_at_end() {
-        let lock = Lock {
-            owner: Address::generate(&Env::default()),
-            amount: 100,
-            start_ledger: 100,
-            end_ledger: 200,
-            initial_voting_power: 125,
-            withdrawn: false,
-        };
-        let power = VoteEscrowContract::compute_decayed_power(&lock, 200);
-        assert_eq!(power, 100);
-    }
-
-    #[test]
-    fn test_compute_decayed_power_at_mid() {
-        let lock = Lock {
-            owner: Address::generate(&Env::default()),
-            amount: 100,
-            start_ledger: 100,
-            end_ledger: 200,
-            initial_voting_power: 125,
-            withdrawn: false,
-        };
-        let power = VoteEscrowContract::compute_decayed_power(&lock, 150);
-        assert!(power > 100 && power < 125);
-        assert_eq!(power, 112);
-    }
-
-    #[test]
-    fn test_compute_decayed_power_before_start() {
-        let lock = Lock {
-            owner: Address::generate(&Env::default()),
-            amount: 100,
-            start_ledger: 100,
-            end_ledger: 200,
-            initial_voting_power: 125,
-            withdrawn: false,
-        };
-        let power = VoteEscrowContract::compute_decayed_power(&lock, 99);
-        assert_eq!(power, 0);
-    }
-}
+mod tests;
