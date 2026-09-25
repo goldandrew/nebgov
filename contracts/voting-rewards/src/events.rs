@@ -42,14 +42,14 @@ pub fn emit_pool_funded(env: &Env, funder: &Address, amount: i128) {
 
 pub fn emit_admin_set(env: &Env, new_admin: &Address) {
     env.events().publish(
-        (Symbol::new(env, ADMIN_SET_TOPIC),),
-        new_admin.clone(),
+        (Symbol::new(env, ADMIN_SET_TOPIC), new_admin.clone()),
+        (),
     );
 }
 
 pub fn emit_epoch_duration_updated(env: &Env, new_duration_ledgers: u32) {
     env.events().publish(
-        (Symbol::new(env, EPOCH_DURATION_UPDATED_TOPIC),),
+        Symbol::new(env, EPOCH_DURATION_UPDATED_TOPIC),
         new_duration_ledgers,
     );
 }
